@@ -44,10 +44,10 @@ Chain strategy: pending
 
 ## Phase 2: P2 — Thin widget + tests
 
-- [ ] 2.1 RED — `tests/test_path_manager_panel.py`: labels render macOS root + connected status; `os.environ` unchanged on open/cancel (REQ-1/REQ-4); `importorskip("PySide6")` (D6). Verify: fails or skips.
-- [ ] 2.2 GREEN — `SamanTools/ui/path_manager_panel.py` (D4): dual import PySide2→PySide6 + `QtAlignment` compat; dialog renders helper data only; env ONLY via `injector.cachear_env` + `aplicar_entorno`. Verify: 2.1 green + `py_compile`.
-- [ ] 2.3 RED — onboarding submit → `asegurar_perfil` once + env applied (REQ-2); change-base re-applies 2027, no direct widget assignment (REQ-3); `abrir_dialogo()` headless silent (REQ-5). Verify: fails.
-- [ ] 2.4 GREEN — submit handlers + `abrir_dialogo()` guarding `nuke.GUI`/PySide, never raises, modal `exec()` (D4). Verify: 2.3 green; panel suite green; `py_compile`.
+- [x] 2.1 RED — `tests/test_path_manager_panel.py`: labels render macOS root + connected status; `os.environ` unchanged on open/cancel (REQ-1/REQ-4); `importorskip("PySide6")` (D6). Verify: fails or skips.
+- [x] 2.2 GREEN — `SamanTools/ui/path_manager_panel.py` (D4): dual import PySide2→PySide6 + `QtAlignment` compat; dialog renders helper data only; env ONLY via `injector.cachear_env` + `aplicar_entorno`. Verify: 2.1 green + `py_compile`.
+- [x] 2.3 RED — onboarding submit → `asegurar_perfil` once + env applied (REQ-2); change-base re-applies 2027, no direct widget assignment (REQ-3); `abrir_dialogo()` headless silent (REQ-5). Verify: fails.
+- [x] 2.4 GREEN — submit handlers + `abrir_dialogo()` guarding `nuke.GUI`/PySide, never raises, modal `exec()` (D4). Verify: 2.3 green; panel suite green; `py_compile`.
 
 ## Phase 3: P3 — Menu integration
 
