@@ -70,6 +70,21 @@ y por SO (3x3).
     de un perfil conservando las 9 raices (TO_VFX/COMP/FROM_VFX x 3 SO) con
     READ-RENAME-WRITE bajo el lock del motor; ``ValueError`` claro si el viejo
     no existe o el nuevo ya esta tomado. Devuelve el store interno actualizado.
+  - Espacios EXTRA (spec panel-helper, espacios-extra): claves del perfil
+    fuera de ``_ESPACIOS``, guardadas bajo su nombre sanitizado (UPPER,
+    ``A-Z0-9``, espacio→``_``, colapso). ``sanitizar_espacio_extra`` valida el
+    nombre (delega la sanitizacion a ``rutas_engine._clave_env_para_espacio``
+    y rechaza: colision canonica, ``hosts``/``default``, ``PROJECT_ROOT``,
+    duplicado intra-extra y nombres path-like/JSON-reservados);
+    ``raices_para_so`` y el env los listan canonico-primero + SORTED (D3);
+    ``preparar_cambio_base`` acepta un extra conocido del perfil (slot
+    ``(extra, so)``); ``agregar_espacio_extra``/``eliminar_espacio_extra``
+    persisten/quitan extras bajo el lock del motor. R3: la forma del perfil
+    sigue siendo SOLO canonica (``detectar_forma_perfil`` del motor) — una
+    entrada manuscrita con extras pero SIN espacio canonico se clasifica
+    legacy (``estado_panel.legacy``, SOLO-LECTURA) y la siguiente escritura
+    la regenera entera (extras perdidos); el helper NUNCA emite ese store por
+    sus flujos: todo corte de escritura exige forma nueva (nunca extras-only).
 
 Determinismo: inputs identicos → salidas identicas (el unico dato vivo,
 ``entorno.estado_unidad``, respeta timeout + cache del motor). Ninguna ruta
@@ -141,12 +156,18 @@ def _es_ruta_aparente(valor):
 def _copia_con_slot(perfil, so, slots):
     """Copia del perfil con SOLO los slots indicados reemplazados.
 
-    ``slots`` es ``{espacio: raiz}``; para cada espacio canonico conserva las
-    raices existentes (otros SO intactos) y, si el espacio esta en ``slots``,
-    reemplaza la raiz del ``so``. Los demas espacios quedan tal cual.
+    ``slots`` es ``{espacio: raiz}``; para cada espacio conserva las raices
+    existentes (otros SO intactos) y, si el espacio esta en ``slots``,
+    reemplaza la raiz del ``so``. Los demas espacios quedan tal cual. D5:
+    se iteran TODAS las claves del perfil (canonicos en orden ``_ESPACIOS`` +
+    extras SORTED, D3), no solo los canonicos — asi los espacios EXTRA y sus
+    raices de otros SO sobreviven a cualquier cambio de base.
     """
+    claves = list(_ESPACIOS) + sorted(
+        clave for clave in perfil if clave not in _ESPACIOS
+    )
     actualizado = {}
-    for espacio in _ESPACIOS:
+    for espacio in claves:
         raices = dict(perfil.get(espacio) or {})
         if espacio in slots:
             raices[so] = slots[espacio]
@@ -171,14 +192,15 @@ def listar_perfiles(ruta_store):
 
 
 def raices_para_so(usuario, ruta_store, so):
-    """Raices de los TRES espacios del usuario para el ``so`` (lectura pura).
+    """Raices de los espacios del usuario para el ``so`` (lectura pura).
 
     Relee el store y devuelve ``{espacio: raiz}`` con la raiz del ``so``
-    inyectado para cada espacio canonico (raices ausentes → ``None``): es el
-    dato de lectura que el widget usa para renderizar los campos del modo
-    avanzado (mockup) con las rutas ACTUALES del perfil. Usuario sin perfil
-    nuevo, store ausente o corrupto → ``{}`` sin lanzar. Nunca escribe ni
-    toca ``os.environ``.
+    inyectado para cada espacio (raices ausentes → ``None``): los canonicos
+    primero en orden ``_ESPACIOS`` y luego los extras SORTED lexicograficamente
+    (D3, determinista). Es el dato de lectura que el widget usa para renderizar
+    los campos del modo avanzado (mockup) con las rutas ACTUALES del perfil.
+    Usuario sin perfil nuevo, store ausente o corrupto → ``{}`` sin lanzar.
+    Nunca escribe ni toca ``os.environ``.
     """
     try:
         perfiles = rutas_engine.leer_perfiles(ruta_store)
@@ -187,9 +209,10 @@ def raices_para_so(usuario, ruta_store, so):
     perfil = perfiles.get(usuario)
     if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
         return {}
+    extras = sorted(clave for clave in perfil if clave not in _ESPACIOS)
     return {
         espacio: rutas_engine.ruta_para_espacio(perfil, espacio, so)
-        for espacio in _ESPACIOS
+        for espacio in list(_ESPACIOS) + extras
     }
 
 
@@ -285,23 +308,29 @@ def preparar_cambio_base(usuario, ruta_store, so, espacio, nueva_ruta="", ruta_p
     entrantes; las otras raices del perfil (otros espacios, otros SO) y los
     demas usuarios quedan intactos.
 
-    Dos modos:
+    Dos modos y un extra conocido:
 
     * Por espacio (spec S3): ``espacio`` es un espacio canonico
       (TO_VFX|COMP|FROM_VFX) y ``nueva_ruta`` su raiz completa; SOLO ese slot
       se reemplaza. El env delta sale de ``armar_estado_env`` (PROJECT_ROOT
       por corte estructural del plato) y la unidad se consulta sobre la raiz
       nueva.
+    * Extra del perfil (spec panel-helper, R4): ``espacio`` es una clave
+      EXISTENTE del perfil fuera de ``_ESPACIOS`` (p.ej. ``3D``); SOLO el
+      slot ``(extra, so)`` se reemplaza y el env delta lleva ``PYTHON_<extra>``
+      con la raiz nueva.
     * Todos (compat transitoria con el widget P2, migrado en S4): ``espacio``
-      no es canonico pero PARECE una base de proyecto (``/Volumes/...``,
-      ``L:/...``); la base rellena el slot del SO en los TRES espacios como
-      ``{base}/{ESPACIO}`` (``crear_perfil_default``), con env forzado a esa
-      base y unidad sobre ella.
+      no es canonico ni clave del perfil pero PARECE una base de proyecto
+      (``/Volumes/...``, ``L:/...``); la base rellena el slot del SO en los
+      TRES espacios como ``{base}/{ESPACIO}`` (``crear_perfil_default``), con
+      env forzado a esa base y unidad sobre ella.
 
-    Un ``espacio`` que no es ni canonico ni ruta → ``ValueError``. Sin perfil
-    nuevo → ``ValueError`` claro (nunca onboarding silencioso como
-    ``resolver_perfil``). Devuelve ``{"perfil", "env", "unidad"}`` y NO toca
-    ``os.environ``: la propagacion la hace el widget (S4).
+    El orden del accept-list es BINDIENTE (R4): canonico → clave del perfil →
+    ruta aparente → ``ValueError``. Un ``espacio`` que no es ni canonico ni
+    clave del perfil ni ruta → ``ValueError``. Sin perfil nuevo → ``ValueError``
+    claro (nunca onboarding silencioso como ``resolver_perfil``). Devuelve
+    ``{"perfil", "env", "unidad"}`` y NO toca ``os.environ``: la propagacion
+    la hace el widget (S4).
     """
     perfiles = rutas_engine.leer_perfiles(ruta_store)
     perfil = perfiles.get(usuario)
@@ -309,7 +338,7 @@ def preparar_cambio_base(usuario, ruta_store, so, espacio, nueva_ruta="", ruta_p
         raise ValueError(
             f"No hay perfil activo para '{usuario}': complete el onboarding primero"
         )
-    if espacio in _ESPACIOS:
+    if espacio in _ESPACIOS or espacio in perfil:
         raiz_nueva = _normalizar_ruta(nueva_ruta)
         slots = {espacio: raiz_nueva}
         base_env = None
@@ -321,7 +350,8 @@ def preparar_cambio_base(usuario, ruta_store, so, espacio, nueva_ruta="", ruta_p
     else:
         raise ValueError(
             f"Espacio invalido para cambio de base: '{espacio}' "
-            f"(esperado {', '.join(_ESPACIOS)} o una base de proyecto)"
+            f"(esperado {', '.join(_ESPACIOS)}, un espacio extra del perfil "
+            f"o una base de proyecto)"
         )
     actualizado = _copia_con_slot(perfil, so, slots)
     rutas_engine.guardar_perfiles(ruta_store, {usuario: actualizado})
@@ -365,6 +395,102 @@ def guardar_base_unificada(usuario, ruta_store, so, base="", ruta_plato=""):
         "perfil": actualizado,
         "env": env,
         "unidad": entorno.estado_unidad(raiz_nueva),
+    }
+
+
+# --- Espacios extra: validacion + add/remove (spec panel-helper, R2/R8/D7) ----
+
+
+def sanitizar_espacio_extra(nombre, perfil):
+    """Valida y sanitiza el NOMBRE de un espacio extra (spec panel-helper).
+
+    Delega la sanitizacion al motor (``rutas_engine._clave_env_para_espacio``,
+    fuente unica de verdad): UPPER, ``A-Z0-9`` conservado, espacio→``_``,
+    colapso y strip; el motor ya rechaza vacio tras sanitizar, ``/``/``{}``
+    (R8) y ``HOSTS``/``DEFAULT`` (R2). Ademas se rechaza AQUI: un resultado
+    que colisiona con un espacio CANONICO (``TO_VFX``/``COMP``/``FROM_VFX``,
+    el trio fijo de ``PYTHON_*``), el literal ``PROJECT_ROOT`` (reservado) y
+    un resultado que ya existe entre los extras del perfil (duplicado
+    intra-extra). Devuelve la clave sanitizada, que ES la clave de store del
+    espacio extra.
+    """
+    s = rutas_engine._clave_env_para_espacio(nombre)
+    if s in _ESPACIOS:
+        raise ValueError(
+            f"El espacio extra {nombre!r} colisiona con el espacio canonico {s!r}"
+        )
+    if s == "PROJECT_ROOT":
+        raise ValueError(f"El nombre {nombre!r} esta reservado (PROJECT_ROOT)")
+    extras_existentes = (
+        {clave for clave in perfil if clave not in _ESPACIOS}
+        if isinstance(perfil, dict)
+        else set()
+    )
+    if s in extras_existentes:
+        raise ValueError(f"Ya existe un espacio extra llamado {s!r}")
+    return s
+
+
+def agregar_espacio_extra(usuario, ruta_store, so, nombre, nueva_ruta):
+    """Persiste un espacio EXTRA nuevo y devuelve DATA (spec panel-helper, D7).
+
+    Valida el nombre via ``sanitizar_espacio_extra`` (canonicos, legacy
+    ``hosts``/``default``, ``PROJECT_ROOT``, duplicados intra-extra y nombres
+    path-like/JSON-reservados → ``ValueError``) y mergea
+    ``{usuario: {<clave>: {<so>: nueva_ruta}}}`` por ``guardar_perfiles``
+    (READ-MERGE-WRITE bajo lock): todos los demas espacios, extras y usuarios
+    quedan intactos. Sigue la convencion de slot de los demas cortes: el
+    espacio nuevo nace con SOLO la raiz del ``so`` inyectado (los otros SO se
+    completan luego desde el widget). Sin perfil nuevo → ``ValueError`` claro
+    (nunca onboarding silencioso y, por R3, nunca un store extras-only).
+    Devuelve ``{"perfil", "env", "unidad"}`` como datos y NO toca
+    ``os.environ``: la propagacion la hace el widget (S4).
+    """
+    perfiles = rutas_engine.leer_perfiles(ruta_store)
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
+        raise ValueError(
+            f"No hay perfil activo para '{usuario}': complete el onboarding primero"
+        )
+    clave = sanitizar_espacio_extra(nombre, perfil)
+    raiz_nueva = _normalizar_ruta(nueva_ruta)
+    rutas_engine.guardar_perfiles(ruta_store, {usuario: {clave: {so: raiz_nueva}}})
+    actualizado = rutas_engine.leer_perfiles(ruta_store)[usuario]
+    env = injector.armar_estado_env(actualizado, so, "")
+    return {
+        "perfil": actualizado,
+        "env": env,
+        "unidad": entorno.estado_unidad(raiz_nueva),
+    }
+
+
+def eliminar_espacio_extra(usuario, ruta_store, espacio, so):
+    """Elimina UN espacio extra del perfil y devuelve DATA (spec, D7).
+
+    Delega al motor (``eliminar_espacio_store``: READ-POP-WRITE bajo lock);
+    el motor rechaza espacios CANONICOS (D1, trio inmutable) y usuarios
+    ausentes, y una clave ausente es no-op byte-identico. El helper valida
+    ademas la forma del perfil antes de escribir (sin perfil nuevo →
+    ``ValueError`` claro) y recomputa env + unidad sobre el perfil resultante
+    para el ``so`` inyectado. La firma lleva ``so`` (D7, desviacion documentada
+    de la firma minimal de la spec: el env y la unidad del contrato
+    ``{"perfil", "env", "unidad"}`` se resuelven para el SO inyectado). NO
+    toca ``os.environ``: la propagacion la hace el widget (S4).
+    """
+    perfiles = rutas_engine.leer_perfiles(ruta_store)
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
+        raise ValueError(
+            f"No hay perfil activo para '{usuario}': complete el onboarding primero"
+        )
+    store = rutas_engine.eliminar_espacio_store(ruta_store, usuario, espacio)
+    actualizado = store[usuario]
+    env = injector.armar_estado_env(actualizado, so, "")
+    base_actual = _raiz_para_so(actualizado, so)
+    return {
+        "perfil": actualizado,
+        "env": env,
+        "unidad": entorno.estado_unidad(base_actual),
     }
 
 
