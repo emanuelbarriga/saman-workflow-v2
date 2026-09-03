@@ -44,14 +44,14 @@ Scope: engine + helper + widget + tests only; injector/menu/shim untouched (no n
 
 ## Phase 3: Helper (PR 3)
 
-- [ ] 3.1 RED: `sanitizar_espacio_extra` — valid; ValueError: empty, canonical dup, `hosts`/`default`, `PROJECT_ROOT`, intra-extra dup, path-like/JSON-reserved
-- [ ] 3.2 RED: `raices_para_so` extras; `preparar_cambio_base` accepts profile-known extra (env `PYTHON_3D`); `_copia_con_slot` keeps extras (D5); unknown → ValueError; add/remove return data, no `os.environ`
-- [ ] 3.3 GREEN: `sanitizar_espacio_extra(nombre, perfil)` delegating to engine sanitizer
-- [ ] 3.4 GREEN: `raices_para_so` (:190-193) → canonical + sorted extras
-- [ ] 3.5 GREEN: `_copia_con_slot` (:148-154) iterates all `perfil` keys (D5)
-- [ ] 3.6 GREEN: `preparar_cambio_base` (:312-325): `_ESPACIOS` → `in perfil` → `_es_ruta_aparente` → ValueError (R4)
-- [ ] 3.7 GREEN: `agregar_espacio_extra(usuario, ruta_store, so, nombre, nueva_ruta)` + `eliminar_espacio_extra(usuario, ruta_store, espacio, so)` (D7); R3 legacy docstring
-- [ ] 3.8 Guard: `:459`/`:477` unmodified
+- [x] 3.1 RED: `sanitizar_espacio_extra` — valid; ValueError: empty, canonical dup, `hosts`/`default`, `PROJECT_ROOT`, intra-extra dup, path-like/JSON-reserved
+- [x] 3.2 RED: `raices_para_so` extras; `preparar_cambio_base` accepts profile-known extra (env `PYTHON_3D`); `_copia_con_slot` keeps extras (D5); unknown → ValueError; add/remove return data, no `os.environ`
+- [x] 3.3 GREEN: `sanitizar_espacio_extra(nombre, perfil)` delegating to engine sanitizer
+- [x] 3.4 GREEN: `raices_para_so` (:190-193) → canonical + sorted extras
+- [x] 3.5 GREEN: `_copia_con_slot` (:148-154) iterates all `perfil` keys (D5)
+- [x] 3.6 GREEN: `preparar_cambio_base` (:312-325): `_ESPACIOS` → `in perfil` → `_es_ruta_aparente` → ValueError (R4)
+- [x] 3.7 GREEN: `agregar_espacio_extra(usuario, ruta_store, so, nombre, nueva_ruta)` + `eliminar_espacio_extra(usuario, ruta_store, espacio, so)` (D7); R3 legacy docstring
+- [x] 3.8 Guard: `:459`/`:477` unmodified
 
 ## Phase 4: Widget (PR 4)
 
