@@ -32,8 +32,27 @@ implementa:
   - ``_lock_clase``: factory con plataforma inyectada para testear ambas ramas
     (fcntl y msvcrt) en cualquier maquina de desarrollo.
 
-La relativizacion, contexto y contrato de entorno (G7) vienen en un slice
-posterior; este modulo queda autocontenido y 100% stdlib, sin ambiente.
+Parte 3 (slices G7): mapeo relativizacion + contexto + entorno:
+
+  - ``relativizar``/``absolutizar`` (D5 two-track): relativizacion string-level
+    ``[getenv PROJECT_ROOT]`` — la comparacion de prefijo se hace sobre una
+    copia canonica case-folded (backslashes a slashes, strip, ``rstrip("/")``,
+    ``.lower()`` total) y la emision trocea el ORIGINAL normalizado a slashes
+    con casing intacto. Nunca compara contra cadenas crudas (seguridad
+    Windows: ``l:\\vfx\\2026\\...`` ≡ ``L:/VFX/2026``). ``absolutizar``
+    sustituye la base inyectada VERBATIM (casing original, slashes forward).
+  - ``get_context``: ``{proyecto, plano, version, carpeta_salida, base, so}``
+    derivado SOLO de perfil+plato inyectados; ``base`` es la primera root del
+    perfil prefijada por la ruta del plato y ``so`` su plataforma; ``proyecto``
+    via ``proyecto_desde_ruta(plato, base)`` con fallback al primer token del
+    nombre; ``carpeta_salida`` siempre relativa a ``[getenv PROJECT_ROOT]``.
+  - ``variables_entorno``: contrato TCL como DATOS (``PROJECT_ROOT`` + 
+    PYTHON_TO_VFX/COMP/FROM_VFX derivados de ``reconstruir_rutas`` filtrado por
+    ``sufijo_so``). NUNCA muta ``os.environ``: la inyeccion la hace la futura
+    capa de carga (addOnScriptLoad), no el motor.
+
+Este modulo queda autocontenido y 100% stdlib, sin ambiente (sin getpass,
+socket ni platform en la logica: todo parametro es inyectado).
 Ninguna ruta real del estudio: solo raices ficticias ``/Volumes/estudio/2026``,
 ``L:/VFX/2026`` y ``/mnt/estudio/2026``.
 """
@@ -44,6 +63,9 @@ import os
 import re
 import tempfile
 import time
+
+from .entorno import proyecto_desde_ruta, reconstruir_rutas, sufijo_so
+from .nombres import parsear_plato
 
 _ROOT_DEF_MACOS = "/Volumes/estudio/2026"
 _ROOT_DEF_WINDOWS = "L:/VFX/2026"
@@ -313,6 +335,166 @@ def resolver_perfil(user, hostname, path):
     if match is not None:
         return match
     return asegurar_perfil(user, hostname, path)
+
+
+# --- G7: Relativizacion / contexto / entorno (D4/D5) --------------------------
+
+_TOK_PROJECT_ROOT = "[getenv PROJECT_ROOT]"
+
+# Plataformas soportadas para las que existe sufijo de knob (sufijo_so).
+_PLATAFORMAS_SOPORTADAS = ("macOS", "Windows", "Linux")
+
+
+def _normalizar_para_comparar(path):
+    r"""Copia canonica para comparaciones D5 (una cadena, no una tupla).
+
+    ``\`` → ``/``, strip, ``rstrip("/")`` y ``.lower()`` de TODA la cadena.
+    Las unicas transformaciones no length-preserving (strip/rstrip) se aplican
+    por igual al original normalizado usado para emitir, asi el slice por
+    longitud queda consistente. Jamas se compara contra cadenas crudas sin
+    normalizar (precondicion de seguridad Windows de la spec).
+    """
+    return str(path).replace("\\", "/").strip().rstrip("/").lower()
+
+
+def relativizar(ruta_absoluta, base):
+    """Convierte una ruta bajo ``base`` en '[getenv PROJECT_ROOT]/<rel>' (D5).
+
+    Pura de strings, sin filesystem. Two-track: el guard de prefijo
+    ``startswith(clave_base + "/")`` se evalúa sobre la copia canonica
+    case-folded (drive y volumen case-insensitive) e incluye el ``"/"`` final
+    para rechazar prefijos parciales (``/Volumes/estudio2026/...`` bajo base
+    ``/Volumes/estudio/2026``). La emision trocea el ORIGINAL normalizado a
+    slashes con casing intacto en ``len(base_s)`` — toda transformacion es
+    length-preserving, asi el resto conserva su casing (``CINE/TO_VFX`` no se
+    degrada a ``cine/to_vfx``). Fuera de la base → sin cambios.
+    """
+    ruta_s = str(ruta_absoluta).replace("\\", "/").strip().rstrip("/")
+    base_s = str(base).replace("\\", "/").strip().rstrip("/")
+    clave = ruta_s.lower()
+    clave_base = base_s.lower()
+    if clave.startswith(clave_base + "/"):
+        resto = ruta_s[len(base_s):].lstrip("/")
+        return f"{_TOK_PROJECT_ROOT}/{resto}"
+    return ruta_s
+
+
+def absolutizar(ruta, base):
+    """Expande '[getenv PROJECT_ROOT]' a la base inyectada VERBATIM (D5).
+
+    Sustituye el token por ``base`` tal cual fue inyectada (casing original de
+    drive, slashes forward) — nunca por una copia normalizada y nunca a partir
+    de una base deducida. Sin token → la ruta normalizada a slashes, sin
+    cambios. El output usa forward slashes (contrato round-trip Windows).
+    """
+    ruta_s = str(ruta).replace("\\", "/").strip()
+    base_s = str(base).replace("\\", "/").strip().rstrip("/")
+    if ruta_s.startswith(_TOK_PROJECT_ROOT):
+        resto = ruta_s[len(_TOK_PROJECT_ROOT):].lstrip("/")
+        if not resto:
+            return base_s
+        return f"{base_s}/{resto}"
+    return ruta_s
+
+
+def _base_prefijada(perfil, ruta_plato):
+    """Primera root del perfil que es prefijo de la ruta del plato (D4).
+
+    Compara sobre la copia canonica (D5) y devuelve la root VERBATIM
+    (casing original, slashes forward, sin ``/`` final) junto con su
+    plataforma: ``(base, so)``. Sin match → ``(None, None)``. El guard de
+    prefijo parcial rechaza roots como ``/Volumes/estudio2026``.
+    """
+    if not isinstance(perfil, dict):
+        return None, None
+    clave_ruta = _normalizar_para_comparar(ruta_plato)
+    for so, root in perfil.items():
+        if root is None:
+            continue
+        clave_root = _normalizar_para_comparar(root)
+        if clave_ruta.startswith(clave_root + "/"):
+            root_s = str(root).replace("\\", "/").strip().rstrip("/")
+            return root_s, so
+    return None, None
+
+
+def _proyecto_desde_nombre(ruta_plato):
+    """Primer token del nombre del plato (fallback determinista, D4).
+
+    Cubre el plato SOLO con basename (sin ruta bajo la base): ni la ruta ni el
+    parseo canonical aportan proyecto, y la convencion
+    '{PROYECTO}_{EP}_{escena}_{shot}_V{nn}' hace que el prefijo del nombre sea
+    el proyecto. Nunca lanza.
+    """
+    ruta_s = str(ruta_plato or "").replace("\\", "/")
+    basename = ruta_s.rsplit("/", 1)[-1]
+    tallo = basename.rsplit(".", 1)[0] if "." in basename else basename
+    token = tallo.split("_", 1)[0]
+    return token or None
+
+
+def get_context(perfil, ruta_plato):
+    """Contexto ``{proyecto, plano, version, carpeta_salida, base, so}`` (D4).
+
+    Derivado SOLO de perfil y plato inyectados; inputs identicos → outputs
+    identicos. ``base`` es la primera root del perfil prefijada por la ruta del
+    plato y ``so`` su plataforma; ``proyecto`` se deriva con
+    ``proyecto_desde_ruta(plato, base)`` (base inyectada, determinista) y, si
+    no hay match, cae al primer token del nombre del plato. ``carpeta_salida``
+    es siempre relativa a '[getenv PROJECT_ROOT]'. Nombres/versiones
+    malformados nunca lanzan (parseo de nombres nunca raise).
+    """
+    base, so = _base_prefijada(perfil, ruta_plato)
+    parsed = parsear_plato(ruta_plato)
+    plano = parsed.get("plano") if parsed else None
+    version = parsed.get("version") if parsed else None
+
+    proyecto = None
+    if base:
+        proyecto = proyecto_desde_ruta(ruta_plato, base=base)
+    if proyecto is None and parsed and parsed.get("proyecto"):
+        proyecto = parsed["proyecto"]
+    if proyecto is None:
+        proyecto = _proyecto_desde_nombre(ruta_plato)
+
+    carpeta_salida = None
+    if proyecto:
+        carpeta_salida = f"{_TOK_PROJECT_ROOT}/{proyecto}/COMP/"
+    return {
+        "proyecto": proyecto,
+        "plano": plano,
+        "version": version,
+        "carpeta_salida": carpeta_salida,
+        "base": base,
+        "so": so,
+    }
+
+
+def variables_entorno(contexto):
+    """Contrato de entorno TCL como DATOS; nunca muta os.environ (D4/spec).
+
+    Devuelve ``{'PROJECT_ROOT': base resuelta}`` y, si hay base, plataforma
+    soportada y proyecto, ademas PYTHON_TO_VFX / PYTHON_COMP / PYTHON_FROM_VFX
+    derivados de ``reconstruir_rutas(base, proyecto)`` filtrado por
+    ``sufijo_so(so)`` (rutas ficticias con forward slashes). Puro data-driven:
+    la inyeccion real a ``os.environ`` (para el TCL ``[getenv PROJECT_ROOT]``
+    de Nuke via addOnScriptLoad) la hace la futura capa de carga.
+    """
+    if not isinstance(contexto, dict):
+        return {}
+    base = contexto.get("base")
+    if not base:
+        return {}
+    so = contexto.get("so")
+    proyecto = contexto.get("proyecto")
+    env = {"PROJECT_ROOT": str(base)}
+    if so in _PLATAFORMAS_SOPORTADAS and proyecto:
+        suf = sufijo_so(so)
+        rutas = reconstruir_rutas(base, proyecto)
+        env["PYTHON_TO_VFX"] = rutas["TO_VFX_SERVER_" + suf]
+        env["PYTHON_COMP"] = rutas["comp_SERVER_" + suf]
+        env["PYTHON_FROM_VFX"] = rutas["FROM_VFX_SERVER_" + suf]
+    return env
 
 
 # --- Lock (D6) ------------------------------------------------------------------

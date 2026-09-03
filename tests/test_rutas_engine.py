@@ -26,6 +26,21 @@ lock D6, precedencia D2, onboarding D3, TDD estricto):
   no esta en el perfil.
 * Concurrencia REAL (G6): dos procesos onbordean el MISMO par sobre store vacio;
   el perdedor devuelve el perfil del ganador y no duplica.
+* G7 — ``relativizar``/``absolutizar`` (D5 two-track): macOS abs→placeholder,
+  fuera de base intacto, variantes Windows de casing/separador PRESERVANDO el
+  casing de salida ``CINE/TO_VFX`` (comparacion sobre copia canonica
+  case-folded; emision desde el original normalizado a slashes), drive-letter
+  minuscula ≡ mayuscula, prefijo parcial ``estudio2026`` rechazado, round-trip
+  Windows con slashes forward y base inyectada verbatim.
+* G7 — ``get_context`` (D4): ``{proyecto, plano, version, carpeta_salida,
+  base, so}`` derivado SOLO de perfil+plato inyectados; proyecto via
+  ``proyecto_desde_ruta(plato, base)`` con fallback al primer token del nombre;
+  determinismo (inputs identicos → outputs identicos); nombres malformados
+  nunca lanzan; ``carpeta_salida`` siempre relativa a ``[getenv PROJECT_ROOT]``.
+* G7 — ``variables_entorno`` (contrato TCL): ``PROJECT_ROOT`` = base resuelta +
+  PYTHON_TO_VFX/PYTHON_COMP/PYTHON_FROM_VFX desde ``reconstruir_rutas``
+  filtrado por ``sufijo_so``; NUNCA muta ``os.environ`` (la inyeccion la hace
+  la futura capa de carga).
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026``, ``L:/VFX/2026``,
 ``/mnt/estudio/2026``); ninguna ruta real del estudio aparece en fixtures.
@@ -484,3 +499,163 @@ def test_onboarding_concurrente_mismo_par_no_duplica(tmp_path):
     assert store == {"nuevo": {"hosts": {"pc9": _roots_por_defecto()}, "default": _roots_por_defecto()}}
     nombres = sorted(p.name for p in tmp_path.iterdir())
     assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]
+
+# --- G7: Relativizacion / absolutizacion (D5 two-track) -----------------------
+
+
+def test_relativizar_macos_absoluto_a_placeholder():
+    """Spec: ruta bajo la base → '[getenv PROJECT_ROOT]/<rel>'."""
+    ruta = "/Volumes/estudio/2026/CINE/TO_VFX/ep.nk"
+    assert rutas_engine.relativizar(ruta, "/Volumes/estudio/2026") == "[getenv PROJECT_ROOT]/CINE/TO_VFX/ep.nk"
+
+
+def test_relativizar_fuera_de_base_intacto():
+    """Spec: ruta fuera de la base → sin cambios."""
+    assert rutas_engine.relativizar("/elsewhere/x.nk", "/Volumes/estudio/2026") == "/elsewhere/x.nk"
+
+
+def test_relativizar_windows_casing_y_separador_preserva_casing():
+    """D8: variante Windows case/separator relativiza Y conserva 'CINE/TO_VFX'.
+
+    La comparacion se hace sobre la copia canonica case-folded; la emision se
+    trocea desde el ORIGINAL normalizado a slashes (casing intacto, D5).
+    """
+    result = rutas_engine.relativizar(r"l:\vfx\2026\CINE\TO_VFX\ep.nk", "L:/VFX/2026")
+    assert result == "[getenv PROJECT_ROOT]/CINE/TO_VFX/ep.nk"
+
+
+def test_relativizar_drive_minuscula_equivale_drive_mayuscula():
+    """Spec: 'l:/vfx/2026' ≡ 'L:/VFX/2026' (equivalencia drive case-insensitive)."""
+    assert rutas_engine.relativizar("L:/VFX/2026/CINE/ep.nk", "l:/vfx/2026") == "[getenv PROJECT_ROOT]/CINE/ep.nk"
+
+
+def test_relativizar_prefijo_parcial_estudio2026_rechazado():
+    """D5: guard de prefijo parcial — '/Volumes/estudio2026/...' NO cae bajo la base."""
+    assert rutas_engine.relativizar("/Volumes/estudio2026/CINE/x.nk", "/Volumes/estudio/2026") == "/Volumes/estudio2026/CINE/x.nk"
+
+
+def test_absolutizar_placeholder_a_macos_absoluto():
+    """Spec: '[getenv PROJECT_ROOT]' se expande a la base inyectada."""
+    assert rutas_engine.absolutizar("[getenv PROJECT_ROOT]/CINE/ep.nk", "/Volumes/estudio/2026") == "/Volumes/estudio/2026/CINE/ep.nk"
+
+
+def test_absolutizar_windows_round_trip_forward_slashes():
+    """Spec: round-trip Windows — slashes forward, drive case-insensitive."""
+    assert rutas_engine.absolutizar("[getenv PROJECT_ROOT]/CINE/ep.nk", "L:/VFX/2026") == "L:/VFX/2026/CINE/ep.nk"
+
+
+def test_absolutizar_base_inyectada_verbatim():
+    """D5: absolutizar sustituye la base inyectada VERBATIM (casing original)."""
+    assert rutas_engine.absolutizar("[getenv PROJECT_ROOT]/CINE/ep.nk", "l:/vfx/2026") == "l:/vfx/2026/CINE/ep.nk"
+
+
+def test_relativizar_absolutizar_round_trip_macos():
+    """Round-trip: relativizar → absolutizar reconstruye la ruta absoluta."""
+    original = "/Volumes/estudio/2026/CINE/TO_VFX/ep.nk"
+    rel = rutas_engine.relativizar(original, "/Volumes/estudio/2026")
+    assert rel.startswith("[getenv PROJECT_ROOT]/")
+    assert rutas_engine.absolutizar(rel, "/Volumes/estudio/2026") == original
+
+
+def test_normalizar_para_comparar_canonico():
+    """D5: copia canonica — backslashes→slashes, strip, rstrip '/', lower() total."""
+    assert rutas_engine._normalizar_para_comparar("L:\\VFX\\2026\\") == "l:/vfx/2026"
+    assert rutas_engine._normalizar_para_comparar("  /Volumes/estudio/2026/  ") == "/volumes/estudio/2026"
+
+
+# --- G7: get_context (API de contexto, D4) --------------------------------------
+
+
+def test_contexto_perfil_base_y_plato_basename():
+    """Spec: base /Volumes/estudio/2026 + plato 'CINE_107_008_00100_V01.mov'.
+
+    proyecto=='CINE', plano=='008_00100', version=='V01' y carpeta_salida
+    empieza con '[getenv PROJECT_ROOT]'. El contrato D4 expone 6 claves.
+    """
+    ctx = rutas_engine.get_context(_roots_por_defecto(), "CINE_107_008_00100_V01.mov")
+    assert ctx["proyecto"] == "CINE"
+    assert ctx["plano"] == "008_00100"
+    assert ctx["version"] == "V01"
+    assert ctx["carpeta_salida"].startswith("[getenv PROJECT_ROOT]")
+    assert set(ctx.keys()) == {"proyecto", "plano", "version", "carpeta_salida", "base", "so"}
+
+
+def test_contexto_ruta_bajo_base_deriva_proyecto_y_so():
+    """plato con ruta bajo la raiz macOS → base prefijada y so='macOS'."""
+    ctx = rutas_engine.get_context(
+        _roots_por_defecto(), "/Volumes/estudio/2026/CINE/TO_VFX/EP_107/CINE_107_008_00100_V01.mov"
+    )
+    assert ctx["proyecto"] == "CINE"
+    assert ctx["base"] == "/Volumes/estudio/2026"
+    assert ctx["so"] == "macOS"
+
+
+def test_contexto_windows_plato_deriva_so_y_base():
+    """plato Windows (backslashes) bajo la raiz L:/VFX/2026 → so='Windows'."""
+    ctx = rutas_engine.get_context(
+        _roots_por_defecto(), r"L:\VFX\2026\CINE\TO_VFX\EP_107\CINE_107_008_00100_V01.mov"
+    )
+    assert ctx["proyecto"] == "CINE"
+    assert ctx["base"] == "L:/VFX/2026"
+    assert ctx["so"] == "Windows"
+
+
+def test_contexto_determinismo_inputs_identicos():
+    """Spec: inputs identicos → dicts identicos (misma llamada dos veces)."""
+    perfil = _roots_por_defecto()
+    plato = "CINE_107_008_00100_V01.mov"
+    assert rutas_engine.get_context(perfil, plato) == rutas_engine.get_context(perfil, plato)
+
+
+def test_contexto_version_malformada_no_lanza():
+    """Nombre con version en el medio: sin raise, version movida al final (nombres)."""
+    ctx = rutas_engine.get_context(_roots_por_defecto(), "CINE_108_012_V01_0100.mov")
+    assert ctx["proyecto"] == "CINE"
+    assert ctx["plano"] == "012_0100"
+    assert ctx["version"] == "V01"
+
+
+def test_contexto_carpeta_salida_convencion_comp():
+    """D4: carpeta_salida = '[getenv PROJECT_ROOT]/{proyecto}/COMP/'."""
+    ctx = rutas_engine.get_context(
+        _roots_por_defecto(), "/Volumes/estudio/2026/CINE/TO_VFX/EP_107/CINE_107_008_00100_V01.mov"
+    )
+    assert ctx["carpeta_salida"] == "[getenv PROJECT_ROOT]/CINE/COMP/"
+
+
+# --- G7: variables_entorno (contrato TCL, D4) -----------------------------------
+
+
+def test_variables_entorno_project_root_y_python_vars():
+    """Spec: contrato con PROJECT_ROOT + PYTHON_* derivados de reconstruir_rutas."""
+    ctx = rutas_engine.get_context(
+        _roots_por_defecto(), "/Volumes/estudio/2026/CINE/TO_VFX/EP_107/CINE_107_008_00100_V01.mov"
+    )
+    env = rutas_engine.variables_entorno(ctx)
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX/"
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP/"
+    assert env["PYTHON_FROM_VFX"] == "/Volumes/estudio/2026/CINE/FROM_VFX/"
+
+
+def test_variables_entorno_so_linux_usa_sufijo_artist():
+    """so Linux → sufijo de knob ARTIST (sufijo_so), rutas ficticias Linux."""
+    ctx = {"base": "/mnt/estudio/2026", "so": "Linux", "proyecto": "CINE"}
+    env = rutas_engine.variables_entorno(ctx)
+    assert env["PROJECT_ROOT"] == "/mnt/estudio/2026"
+    assert env["PYTHON_TO_VFX"] == "/mnt/estudio/2026/CINE/TO_VFX/"
+    assert env["PYTHON_COMP"] == "/mnt/estudio/2026/CINE/COMP/"
+    assert env["PYTHON_FROM_VFX"] == "/mnt/estudio/2026/CINE/FROM_VFX/"
+
+
+def test_variables_entorno_no_muta_os_environ():
+    """Spec: contrato PURO — os.environ queda intacto tras la llamada."""
+    antes = dict(os.environ)
+    ctx = {"base": "/Volumes/estudio/2026", "so": "macOS", "proyecto": "CINE"}
+    rutas_engine.variables_entorno(ctx)
+    assert dict(os.environ) == antes
+
+
+def test_variables_entorno_sin_base_devuelve_vacio():
+    """Sin base resuelta no hay PROJECT_ROOT que inyectar: dict vacio, sin raise."""
+    assert rutas_engine.variables_entorno({"proyecto": "CINE"}) == {}
