@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local SDD state (never share)
+.atl/
+
+# Engram project backing (local tool state)
+.engram/
+
+# Local user config (never commit to a public repo)
+config_local.py
