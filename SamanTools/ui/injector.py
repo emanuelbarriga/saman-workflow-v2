@@ -30,9 +30,11 @@ Divide el trabajo en PURE / THIN:
     y lo deja en ``_env_cache`` para que el save re-afirme SOLO desde
     memoria (sin disco ni lock).
 
-``registrar_callbacks`` (bind de nuke.ui) se implementa en H4: necesita el
-modulo nuke en el momento de la llamada y esta fuera del alcance de este
-slice. Ninguna ruta real del estudio: solo raices ficticias
+``registrar_callbacks`` (bind de nuke.ui, addOnScriptLoad/addOnScriptSave) se
+implementa en ``ui/menu.py`` (H4), que necesita el modulo nuke en el momento
+de la llamada; aqui solo vive su flag de idempotencia
+(``_callbacks_registrados``), cacheado por sys.modules entre re-ejecuciones
+del bootstrap. Ninguna ruta real del estudio: solo raices ficticias
 (``/Volumes/estudio/2026``, ``L:/VFX/2026``, ``/mnt/estudio/2026``).
 """
 
@@ -46,6 +48,12 @@ from ..core import rutas_engine
 # el env que el injector ya escribio esta sesion).
 _env_cache = None
 _env_inyectado = False
+
+# Flag de idempotencia de registrar_callbacks (ADR-7): vive AQUI, no en
+# ui/menu.py, porque sys.modules cachea este modulo entre re-ejecuciones del
+# bootstrap (cada exec de menu.py recibe un namespace fresco). El propio bind
+# de nuke.ui (addOnScriptLoad/addOnScriptSave) se implementa en menu.py (H4).
+_callbacks_registrados = False
 
 _CLAVE_PROJECT_ROOT = "PROJECT_ROOT"
 _NOMBRE_KNOB_OVERRIDE = "project_directory"
