@@ -1,10 +1,6 @@
-# SamanTools Path Manager Helper Specification
+# Delta for panel-path-manager-helper
 
-## Purpose
-
-NEW pure helper (`SamanTools/ui/path_manager.py`): reads the active profile, reports unit status, detects unknown users (returns an onboarding marker) and prepares change-base/onboarding writes. PURE: no nuke, no PySide, no `os.environ` reads or writes — it returns data for the thin widget to render and apply. Scenario paths MUST be fictitious.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Pure, deterministic data layer
 
@@ -83,6 +79,8 @@ The helper MUST return `entorno.estado_unidad` data (`{conectado, ruta, detalle}
 - GIVEN no profile for `"nuevo"` and form base `/Volumes/estudio/2026/CINE/COMP`
 - WHEN `preparar_onboarding("nuevo", ruta_store, base, "macOS")` runs
 - THEN the store gains `"nuevo"` with macOS roots for the three spaces plus fictitious Windows/Linux roots, and the returned env delta contains the macOS COMP root
+
+## ADDED Requirements
 
 ### Requirement: Profile listing
 

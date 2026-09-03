@@ -1,10 +1,6 @@
-# SamanTools Path Manager Widget Specification
+# Delta for panel-path-manager-widget
 
-## Purpose
-
-NEW thin modal widget (`SamanTools/ui/path_manager_panel.py`): `PathManagerDialog(QDialog)` following the V1 `cambiar_colorspace` pattern (PySide2/PySide6 dual import). It renders helper data (profile, unit status, onboarding form) and applies env changes ONLY through `injector.cachear_env` + `injector.aplicar_entorno`. All logic lives in the pure helper; widget tests run with pytest-qt + fakes (available: pytest-qt 4.5.0), and if Qt is unavailable the widget MAY be 0% covered. Scenario paths MUST be fictitious.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Thin dialog bound to the helper
 
@@ -42,16 +38,6 @@ The dialog MUST send the new SPACE root to the helper's change-base (persisted m
 - WHEN the user confirms the change
 - THEN the helper's change-base persists the merged profile and, after applying, `os.environ["PROJECT_ROOT"]` equals the cut root, with no direct env assignment in the widget's own code
 
-### Requirement: Env purity outside aplicar_entorno
-
-All `os.environ` mutation in the module MUST pass through `injector.aplicar_entorno`.
-
-#### Scenario: snapshot unchanged on cancel
-
-- GIVEN a snapshot of `os.environ`
-- WHEN the dialog opens, renders, and the user cancels without submitting
-- THEN `os.environ` equals the snapshot
-
 ### Requirement: Modal entry point
 
 The module MUST expose an entry function (e.g. `abrir_dialogo()`) that shows the dialog modally as the menu command's callback target, MUST take `usuario` (no hostname), and MUST degrade gracefully (never raise upward) when no GUI session or helper data exists. On open it MUST refresh the profile list from the store.
@@ -69,6 +55,8 @@ The module MUST expose an entry function (e.g. `abrir_dialogo()`) that shows the
 - GIVEN a store that gained `"pedro"` after the previous dialog open
 - WHEN `abrir_dialogo` opens the dialog
 - THEN the combo lists `"pedro"`
+
+## ADDED Requirements
 
 ### Requirement: Profile selector combo
 

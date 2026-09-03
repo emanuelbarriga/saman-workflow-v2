@@ -1,10 +1,6 @@
-# Core Rutas Engine Specification
+# Delta for core-rutas-engine
 
-## Purpose
-
-NEW pure-stdlib engine (`SamanTools/core/rutas_engine.py`): JSON profile store, resolution by user (hostname removed), per-space tri-platform mapping, string-level `[getenv PROJECT_ROOT]` relativization, context API, unknown-user onboarding. Logic MUST be fully injectable (user, profile path, base as parameters); ambient `getpass`/`socket` MUST NOT appear in engine logic. Scenario paths MUST be fictitious or relative.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Injectable, deterministic API
 
@@ -56,11 +52,18 @@ All entry points MUST take `user`, profile `path` and base as parameters, never 
 - WHEN a write for `"ana"` runs
 - THEN the entry is replaced by the new per-space shape AND the write signals regeneration (for a UI warning)
 
+## RENAMED Requirements
+
+### Requirement: Profile resolution by user/hostname → Profile resolution by user
+
+(Reason: the hostname level disappears — a profile is a username with independent per-platform space roots; the precedence ladder is removed.)
+(Migration: update resolver/tests/doc references from pair identity to user-only.)
+
+## MODIFIED Requirements
+
 ### Requirement: Profile resolution by user
 
 `resolver_perfil(user, path)` MUST match `perfiles.get(user)` directly (no hostname, no ladder). An unknown user MUST trigger onboarding, never raise and never return `None` publicly.
-
-(Previously: `Profile resolution by user/hostname` — matched exact user+hostname, then user-only, then hostname-only through a precedence ladder. Reason for rename: the hostname level disappears — a profile is a username with independent per-platform space roots; the precedence ladder is removed. Migration: update resolver/tests/doc references from pair identity to user-only.)
 
 #### Scenario: known user resolves
 
@@ -74,53 +77,24 @@ All entry points MUST take `user`, profile `path` and base as parameters, never 
 - WHEN `resolver_perfil("nuevo", path)` runs
 - THEN no exception is raised, onboarding persists a new-shape profile, and a later resolve returns it
 
+## RENAMED Requirements
+
+### Requirement: Tri-platform mapping → Per-space tri-platform mapping
+
+(Reason: roots are now per space AND per platform — three independent roots per OS, no single base per profile.)
+(Migration: replace `ruta_para_plataforma(perfil, so)` call sites/tests with the space-aware lookup.)
+
+## MODIFIED Requirements
+
 ### Requirement: Per-space tri-platform mapping
 
 A resolved profile MUST expose one root per space per platform. `ruta_para_espacio(perfil, espacio, so)` MUST return the root for `espacio` in (`TO_VFX`, `COMP`, `FROM_VFX`) on `so` in (`macOS`, `Windows`, `Linux`); a missing combination MUST yield `None` without raising. The three spaces are INDEPENDENT (may live on different disks). Roots MUST be fictitious (`/Volumes/estudio/2026/CINE/TO_VFX`, `L:/VFX/2026/CINE/TO_VFX`, `/mnt/estudio/2026/CINE/TO_VFX`) or `[getenv PROJECT_ROOT]`-relative; never real studio paths.
-
-(Previously: `Tri-platform mapping` — one base root per platform via `ruta_para_plataforma(perfil, so)`. Reason for rename: roots are now per space AND per platform — three independent roots per OS, no single base per profile. Migration: replace `ruta_para_plataforma(perfil, so)` call sites/tests with the space-aware lookup.)
 
 #### Scenario: independent space roots map per platform
 
 - GIVEN a profile whose COMP root for macOS is `/Volumes/estudio/2026/CINE/COMP` and for Windows is `L:/VFX/2026/CINE/COMP`
 - WHEN `ruta_para_espacio(perfil, "COMP", so)` runs for each `so`
 - THEN each returns its fictitious root
-
-### Requirement: String-level relativization
-
-`relativizar(ruta_absoluta, base)` MUST convert a path under `base` to `"[getenv PROJECT_ROOT]/<rel>"`; a path outside `base` MUST be returned unchanged. `absolutizar(ruta, base)` MUST expand `[getenv PROJECT_ROOT]` into the injected `base`. Both MUST be pure string ops (no filesystem access).
-
-**Normalization precondition (Windows safety):** before any prefix comparison, BOTH inputs MUST be normalized: backslashes converted to `/`, drive-letter case lowercased on Windows-style roots (`l:/vfx/2026` ≡ `L:/VFX/2026`), trailing slashes stripped. A comparison against raw, non-normalized strings MUST NOT be used: it would silently fail to relativize Windows paths that differ only in separator or drive case. `absolutizar` output SHOULD keep the injected `base`'s original casing and use forward slashes.
-
-#### Scenario: absolute to placeholder
-
-- GIVEN ruta `"/Volumes/estudio/2026/CINE/TO_VFX/ep.nk"`, base `"/Volumes/estudio/2026"`
-- WHEN `relativizar(ruta, base)` runs
-- THEN result equals `"[getenv PROJECT_ROOT]/CINE/TO_VFX/ep.nk"`
-
-#### Scenario: placeholder back to absolute
-
-- GIVEN ruta `"[getenv PROJECT_ROOT]/CINE/ep.nk"`, base `"/Volumes/estudio/2026"`
-- WHEN `absolutizar(ruta, base)` runs
-- THEN result equals `"/Volumes/estudio/2026/CINE/ep.nk"`
-
-#### Scenario: outside base untouched
-
-- GIVEN ruta `"/elsewhere/x.nk"`, base `"/Volumes/estudio/2026"`
-- WHEN `relativizar(ruta, base)` runs
-- THEN result is unchanged
-
-#### Scenario: Windows casing and separator variants relativize
-
-- GIVEN ruta `"l:\\vfx\\2026\\CINE\\TO_VFX\\ep.nk"` and base `"L:/VFX/2026"`
-- WHEN `relativizar(ruta, base)` runs
-- THEN result equals `"[getenv PROJECT_ROOT]/CINE/TO_VFX/ep.nk"`
-
-#### Scenario: Windows variant round-trips back
-
-- GIVEN ruta `"[getenv PROJECT_ROOT]/CINE/ep.nk"` and base `"L:/VFX/2026"`
-- WHEN `absolutizar(ruta, base)` runs
-- THEN result uses forward slashes and matches `"L:/VFX/2026/CINE/ep.nk"` case-insensitively on the drive letter
 
 ### Requirement: Context API
 

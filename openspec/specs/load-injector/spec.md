@@ -8,19 +8,21 @@ NEW load layer (`SamanTools/ui/injector.py`, name confirmed in design): resolves
 
 ### Requirement: Pure environment assembly
 
-`armar_estado_env(perfil, so, ruta_plato, base=None) -> dict` MUST be pure: no nuke import, no global state, MUST NOT mutate `os.environ`. It MUST assemble the context with explicit `so` and a base from the `base` parameter or `ruta_para_plataforma(perfil, so)`, correcting the engine gap where an untitled script or a path outside every root yields `base=None`.
+`armar_estado_env(perfil, so, ruta_plato, base=None) -> dict` MUST be pure: no nuke import, no global state, MUST NOT mutate `os.environ`. `PROJECT_ROOT` MUST be the plate's project root via structural cut (`raiz_proyecto_desde_ruta`, `core-entorno`) — NOT base detection. `PYTHON_TO_VFX` / `PYTHON_COMP` / `PYTHON_FROM_VFX` MUST be the profile's space roots for the explicit `so`. When the plate yields no project root (untitled script or no marker), `PROJECT_ROOT` MUST fall back to the injected `base`, then to the current-SO space root.
 
-#### Scenario: comp under root yields full env
+(Previously: `PROJECT_ROOT` was the single profile base; PYTHON_* were derived from `reconstruir_rutas` on that base.)
 
-- GIVEN a profile with base `/Volumes/estudio/2026`, `so="macOS"` and plate path `/Volumes/estudio/2026/CINE/TO_VFX/ep.nk`
+#### Scenario: comp under space root yields cut env
+
+- GIVEN a profile with COMP root `/Volumes/estudio/2026/CINE/COMP` (macOS) and plate `/Volumes/estudio/2026/CINE/COMP/EP_100/ep.nk`
 - WHEN `armar_estado_env(perfil, "macOS", ruta)` runs
-- THEN the dict has `"PROJECT_ROOT": "/Volumes/estudio/2026"` plus `PYTHON_TO_VFX` / `PYTHON_COMP` / `PYTHON_FROM_VFX` derived from that base
+- THEN the dict has `"PROJECT_ROOT": "/Volumes/estudio/2026/CINE"` and `PYTHON_TO_VFX`/`PYTHON_COMP`/`PYTHON_FROM_VFX` equal to the profile's macOS space roots
 
-#### Scenario: untitled script still gets a base
+#### Scenario: untitled script still gets a root
 
-- GIVEN `ruta_plato=""` (untitled) and base `/Volumes/estudio/2026` passed explicitly
-- WHEN `armar_estado_env(perfil, "macOS", "", base="/Volumes/estudio/2026")` runs
-- THEN `PROJECT_ROOT` equals the injected base although `get_context` would return `base=None`
+- GIVEN `ruta_plato=""` (untitled) and base `/Volumes/estudio/2026/CINE/COMP` passed explicitly
+- WHEN `armar_estado_env(perfil, "macOS", "", base="/Volumes/estudio/2026/CINE/COMP")` runs
+- THEN `PROJECT_ROOT` equals the injected base (no structural cut possible) and no space root is lost
 
 #### Scenario: deterministic across calls
 
@@ -82,12 +84,20 @@ The loader MUST cache the last assembled `env` dict in memory after `addOnScript
 
 ### Requirement: Profile store resolution
 
-The loader MUST resolve the profile-store path in this order: `NUKE_PROFILES_PATH` env var, then the shared per-project path supplied by the studio setup (fictitious in artifacts, e.g. under a project `config/` folder), then `~/.config/saman/nuke_profiles.json`, then engine fictitious onboarding.
+The loader MUST resolve the profile-store path in this order: **project store** `{raiz_proyecto}/.saman/nuke_profiles.json` where `raiz_proyecto` comes from the structural cut of the plate path; then `NUKE_PROFILES_PATH` env var; then `SamanTools.config_local` scoped override; then `~/.config/saman/nuke_profiles.json`. A project store MUST always win when it exists — `NUKE_PROFILES_PATH`/`config_local` become fallbacks for projects without `.saman/`. The project-store probe MUST NOT hang on a dead mount (timed/cached check) and MUST NOT create `.saman/` on read.
 
 **No module-name collision:** the local override MUST NOT be a bare `config_local.py` at the repository root — the repo root enters `sys.path` in Nuke and a generic module name there collides with any other studio plugin using the same name. The override MUST live INSIDE the package as an importable `SamanTools.config_local` module (gitignored) or as a local `.json` read by a `SamanTools.config_local` loader. The store path is config data read through that scoped module, never a naked top-level module.
 
-#### Scenario: env var wins
+(Previously: the env var was the top override — the chain started at `NUKE_PROFILES_PATH`.)
 
-- GIVEN `NUKE_PROFILES_PATH` set to a fictitious project-shared store and a populated `~/.config/saman/nuke_profiles.json`
+#### Scenario: project store wins
+
+- GIVEN `NUKE_PROFILES_PATH` set and a project root whose `.saman/nuke_profiles.json` exists
+- WHEN the store path resolves
+- THEN the project store path is used
+
+#### Scenario: env var is the fallback without .saman
+
+- GIVEN no `.saman/` under the project root and `NUKE_PROFILES_PATH` set
 - WHEN the store path resolves
 - THEN the env-var path is used
