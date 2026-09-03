@@ -738,3 +738,140 @@ def test_env_no_muta_os_environ():
     ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
     rutas_engine.variables_entorno(ctx, perfil=perfil)
     assert dict(os.environ) == antes
+
+
+# --- espacios-extra: sanitizador de clave de entorno (R2/R8) ------------------
+
+
+def test_clave_env_para_espacio_3d_y_matte_paint():
+    """spec: '3D'→'3D', 'matte paint'→'MATTE_PAINT' (sufijos estables)."""
+    assert rutas_engine._clave_env_para_espacio("3D") == "3D"
+    assert rutas_engine._clave_env_para_espacio("matte paint") == "MATTE_PAINT"
+
+
+def test_clave_env_para_espacio_colapsa_guiones_y_recorta_extremos():
+    """spec: colapsa corridas de '_' y hace strip('_') en los extremos."""
+    assert rutas_engine._clave_env_para_espacio("  doble  espacio ") == "DOBLE_ESPACIO"
+    assert rutas_engine._clave_env_para_espacio("pre--post") == "PRE_POST"
+
+
+def test_clave_env_para_espacio_compone_clave_python():
+    """spec: la clave de entorno es SIEMPRE 'PYTHON_' + sufijo sanitizado."""
+    assert "PYTHON_" + rutas_engine._clave_env_para_espacio("3D") == "PYTHON_3D"
+    assert "PYTHON_" + rutas_engine._clave_env_para_espacio("matte paint") == "PYTHON_MATTE_PAINT"
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        "foo/bar",   # R8: forma de ruta
+        "{}",        # R8: JSON-reserved-looking
+        "---",       # sanitiza a vacio
+        "",          # vacio
+        "   ",       # solo espacios: sanitiza a vacio
+        "HOSTS",     # R2: legacy
+        "DEFAULT",   # R2: legacy
+    ],
+)
+def test_clave_env_para_espacio_rechaza_nombres_invalidos(nombre):
+    """spec/R8/R2: nombres invalidos → ValueError, nunca producen clave."""
+    with pytest.raises(ValueError):
+        rutas_engine._clave_env_para_espacio(nombre)
+
+
+# --- espacios-extra: variables_entorno con extras (D3/D4/R6) ------------------
+
+
+def _perfil_con_extras():
+    """Perfil 3x3 + dos extras; insercion NO ordenada para probar sorted()."""
+    perfil = _perfil_por_defecto()
+    perfil["matte paint"] = {"macOS": "/Volumes/estudio/2026/CINE/matte_paint"}
+    perfil["3D"] = {"macOS": "/Volumes/estudio/2026/CINE/3D"}
+    return perfil
+
+
+def test_env_extras_orden_canonico_primero_y_sorted():
+    """spec: canonicos en orden _ESPACIOS, luego extras ordenados (sorted)."""
+    ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
+    env = rutas_engine.variables_entorno(ctx, perfil=_perfil_con_extras())
+    claves = list(env.keys())
+    assert claves[:4] == [
+        "PROJECT_ROOT",
+        "PYTHON_TO_VFX",
+        "PYTHON_COMP",
+        "PYTHON_FROM_VFX",
+    ]
+    # "3D" < "matte paint" lexicograficamente, aunque se insertaron al reves
+    assert claves[4:] == ["PYTHON_3D", "PYTHON_MATTE_PAINT"]
+    assert env["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
+    assert env["PYTHON_MATTE_PAINT"] == "/Volumes/estudio/2026/CINE/matte_paint"
+
+
+def test_env_extras_determinismo_mismos_inputs_mismo_dict():
+    """spec: inputs identicos → dict identico (orden canonico + sorted extras)."""
+    ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
+    a = rutas_engine.variables_entorno(ctx, perfil=_perfil_con_extras())
+    b = rutas_engine.variables_entorno(ctx, perfil=_perfil_con_extras())
+    # No basta con a == b: ambos deben CONTENER los extras (RED real).
+    esperado = {
+        "PROJECT_ROOT": "/Volumes/estudio/2026/CINE",
+        "PYTHON_TO_VFX": "/Volumes/estudio/2026/CINE/TO_VFX",
+        "PYTHON_COMP": "/Volumes/estudio/2026/CINE/COMP",
+        "PYTHON_FROM_VFX": "/Volumes/estudio/2026/CINE/FROM_VFX",
+        "PYTHON_3D": "/Volumes/estudio/2026/CINE/3D",
+        "PYTHON_MATTE_PAINT": "/Volumes/estudio/2026/CINE/matte_paint",
+    }
+    assert a == b == esperado
+
+
+def test_env_extra_sin_root_para_so_se_omite():
+    """spec: extra sin root para el SO actual → clave AUSENTE, nunca ``""``."""
+    perfil = _perfil_por_defecto()
+    perfil["3D"] = {"Windows": "L:/VFX/2026/CINE/3D"}  # sin root macOS
+    perfil["PREVIEW"] = {"macOS": "/Volumes/estudio/2026/CINE/PREVIEW"}  # presente
+    ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
+    env = rutas_engine.variables_entorno(ctx, perfil=perfil)
+    assert "PYTHON_3D" not in env
+    assert env["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+    assert "" not in env.values()
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
+
+
+def test_env_extra_insanitizable_se_omite_y_no_lanza():
+    """D4: clave de store sucia (foo/bar) → omitida, nunca raise, nunca ``""``."""
+    perfil = _perfil_por_defecto()
+    perfil["foo/bar"] = {"macOS": "/Volumes/estudio/2026/CINE/foo"}
+    perfil["PREVIEW"] = {"macOS": "/Volumes/estudio/2026/CINE/PREVIEW"}
+    ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
+    env = rutas_engine.variables_entorno(ctx, perfil=perfil)
+    assert "PYTHON_FOO_BAR" not in env
+    assert "" not in env.values()
+    # los canonicos y los extras validos siguen emitiendose: la omision no rompe el loop
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
+    assert env["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+
+
+def test_env_extra_presente_y_canonico_faltante_fallback_hermano_intacto():
+    """R6/D3: el extra usa su root; el canonico faltante cae al hermano."""
+    perfil = {
+        "TO_VFX": {"macOS": "/Volumes/otro/2026/CINE/TO_VFX"},
+        "FROM_VFX": {"macOS": "/Volumes/estudio/2026/CINE/FROM_VFX"},
+        "3D": {"macOS": "/Volumes/estudio/2026/CINE/3D"},
+        # COMP ausente en macOS → fallback hermano del corte
+    }
+    ctx = {"project_root": "/Volumes/otro/2026/CINE", "so": "macOS"}
+    env = rutas_engine.variables_entorno(ctx, perfil=perfil)
+    assert env["PYTHON_COMP"] == "/Volumes/otro/2026/CINE/COMP"  # hermano (corte)
+    assert env["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"  # del perfil
+
+
+def test_env_extra_no_es_marcador_de_corte_estructural():
+    """R6: un extra NUNCA corta el proyecto; su root si se emite como env."""
+    plato = "/Volumes/estudio/2026/CINE/3D/ep.nk"
+    assert rutas_engine.raiz_proyecto_desde_ruta(plato) is None  # sin corte en '3D'
+    perfil = _perfil_por_defecto()
+    perfil["3D"] = {"macOS": "/Volumes/estudio/2026/CINE/3D"}
+    ctx = {"project_root": "/Volumes/estudio/2026/CINE", "so": "macOS"}
+    env = rutas_engine.variables_entorno(ctx, perfil=perfil)
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
+    assert env["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
