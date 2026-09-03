@@ -61,6 +61,6 @@ Scope: engine + helper + widget + tests only; injector/menu/shim untouched (no n
 
 ## Phase 5: Agreement + injector (PR 5)
 
-- [ ] 5.1 RED: 4-module `_ESPACIOS` equality; `entorno.PREFIJOS` excluded (V1 `comp`); PySide guard
-- [ ] 5.2 RED: `test_injector.py` — `armar_estado_env` extras sorted, missing omitted (1-2 tests)
-- [ ] 5.3 Verify: full `python3 -m pytest` green; zero production delta beyond engine/helper/widget
+- [x] 5.1 RED: 4-module `_ESPACIOS` equality; `entorno.PREFIJOS` excluded (V1 `comp`); PySide guard
+- [x] 5.2 RED: `test_injector.py` — `armar_estado_env` extras sorted, missing omitted (1-2 tests)
+- [x] 5.3 Verify: full `python3 -m pytest` green; zero production delta beyond engine/helper/widget
