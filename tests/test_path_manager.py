@@ -699,3 +699,120 @@ def test_onboarding_perfil_crea_y_selecciona(monkeypatch, tmp_path):
     assert res["perfil"] == guardado["artista"]
     assert res["env"]["PROJECT_ROOT"] == "/Volumes/estudio/2026"
     assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) == "artista"
+
+
+# --- Lectura para el modo avanzado: raices_para_so ---------------------------
+
+
+def test_raices_para_so_devuelve_tres_raices_del_so(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    raices = path_manager.raices_para_so("ana", ruta, "macOS")
+    assert raices == {
+        "TO_VFX": "/Volumes/estudio/2026/CINE/TO_VFX",
+        "COMP": "/Volumes/estudio/2026/CINE/COMP",
+        "FROM_VFX": "/Volumes/estudio/2026/CINE/FROM_VFX",
+    }
+
+
+def test_raices_para_so_windows_y_linux(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    assert path_manager.raices_para_so("ana", ruta, "Windows")["COMP"] == "L:/VFX/2026/CINE/COMP"
+    assert path_manager.raices_para_so("ana", ruta, "Linux")["TO_VFX"] == "/mnt/estudio/2026/CINE/TO_VFX"
+
+
+def test_raices_para_so_desconocido_vacio_y_sin_escribir(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    antes = _bytes_store(tmp_path)
+    assert path_manager.raices_para_so("nuevo", ruta, "macOS") == {}
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"pedro": _ROOTS}
+
+
+def test_raices_para_so_store_ausente_y_corrupto_vacio(tmp_path):
+    assert path_manager.raices_para_so("ana", str(tmp_path / "no.json"), "macOS") == {}
+    ruta = tmp_path / "roto.json"
+    ruta.write_text("{no es json", encoding="utf-8")
+    assert path_manager.raices_para_so("ana", str(ruta), "macOS") == {}
+
+
+# --- Escritura modo SIMPLE: guardar_base_unificada (modo TODOS) --------------
+
+# Base nueva para el modo simple: rellena los TRES espacios del SO actual.
+_BASE_SIMPLE = "/Volumes/estudio/2027"
+
+
+def test_guardar_base_unificada_escribe_tres_espacios_del_so(monkeypatch, tmp_path):
+    """Modo simple: una base rellena el slot del SO en COMP/TO_VFX/FROM_VFX."""
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS, "pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    env_antes = _snapshot_env()
+    res = path_manager.guardar_base_unificada("ana", ruta, "macOS", _BASE_SIMPLE)
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2027/COMP"
+    assert store["ana"]["TO_VFX"]["macOS"] == "/Volumes/estudio/2027/TO_VFX"
+    assert store["ana"]["FROM_VFX"]["macOS"] == "/Volumes/estudio/2027/FROM_VFX"
+    assert store["ana"]["COMP"]["Windows"] == "L:/VFX/2026/CINE/COMP"
+    assert store["ana"]["TO_VFX"]["Linux"] == "/mnt/estudio/2026/CINE/TO_VFX"
+    assert store["pedro"] == _ROOTS
+    assert res["perfil"] == store["ana"]
+    assert res["env"]["PROJECT_ROOT"] == _BASE_SIMPLE
+    assert res["unidad"]["conectado"] is True
+    assert _snapshot_env() == env_antes
+
+
+def test_guardar_base_unificada_slot_windows(monkeypatch, tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    res = path_manager.guardar_base_unificada("ana", ruta, "Windows", "M:/VFX/2027")
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["COMP"]["Windows"] == "M:/VFX/2027/COMP"
+    assert store["ana"]["TO_VFX"]["Windows"] == "M:/VFX/2027/TO_VFX"
+    assert store["ana"]["FROM_VFX"]["Windows"] == "M:/VFX/2027/FROM_VFX"
+    assert store["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2026/CINE/COMP"
+    assert res["env"]["PROJECT_ROOT"] == "M:/VFX/2027"
+
+
+def test_guardar_base_unificada_normaliza_slash_y_rstrip(monkeypatch, tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    path_manager.guardar_base_unificada("ana", ruta, "macOS", "/Volumes/estudio/2027/")
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2027/COMP"
+
+
+def test_guardar_base_unificada_base_vacia_lanza(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    with pytest.raises(ValueError, match="vacia"):
+        path_manager.guardar_base_unificada("ana", ruta, "macOS", "   ")
+
+
+def test_guardar_base_unificada_desconocido_lanza_sin_escribir(monkeypatch, tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="No hay perfil activo"):
+        path_manager.guardar_base_unificada("nuevo", ruta, "macOS", _BASE_SIMPLE)
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"pedro": _ROOTS}
+
+
+def test_guardar_base_unificada_legacy_lanza_sin_reescribir(monkeypatch, tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _LEGACY})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="No hay perfil activo"):
+        path_manager.guardar_base_unificada("ana", ruta, "macOS", _BASE_SIMPLE)
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": _LEGACY}
+    assert _bytes_store(tmp_path) == antes

@@ -13,6 +13,10 @@ y por SO (3x3).
 
   - ``listar_perfiles(ruta_store)`` (S3): usuarios del store, ordenados
     alfabeticamente; store ausente o corrupto → ``[]`` sin lanzar.
+  - ``raices_para_so(usuario, ruta_store, so)``: lectura pura — las TRES
+    raices del perfil para el ``so`` inyectado como ``{espacio: raiz}``
+    (para que el widget renderice los campos del modo avanzado); usuario sin
+    perfil nuevo o store ausente/corrupto → ``{}`` sin lanzar.
   - ``estado_panel(ruta_store, usuario, so)``: corte de LECTURA — perfil
     activo (3x3), raiz del SO actual (primera raiz no-None del perfil para el
     SO, orden canonico de espacios), estado de unidad y marcador de
@@ -40,6 +44,13 @@ y por SO (3x3).
     (``{base}/{ESPACIO}``). Un valor que no es ni espacio ni ruta →
     ``ValueError``. Sin perfil nuevo → ``ValueError`` claro (nunca onboarding
     silencioso). Devuelve ``{"perfil", "env", "unidad"}`` como datos.
+  - ``guardar_base_unificada(usuario, ruta_store, so, base="",
+    ruta_plato="")``: corte de ESCRITURA del modo SIMPLE del widget
+    (mockup): UNA base de proyecto rellena el slot ``(espacio, so)`` de los
+    TRES espacios como ``{base}/{ESPACIO}`` (misma regla que el modo TODOS
+    de ``preparar_cambio_base``, sin tocar otros SO ni otros usuarios).
+    Base vacia o sin perfil nuevo → ``ValueError`` claro. Devuelve
+    ``{"perfil", "env", "unidad"}`` como datos.
   - ``preparar_onboarding(usuario, ruta_store, base, so, ruta_plato="")``:
     corte de ESCRITURA (REQ-5, D3) — persiste el perfil via ``asegurar_perfil``
     (lock-safe, slotting de la base inyectada) y devuelve
@@ -157,6 +168,29 @@ def listar_perfiles(ruta_store):
     except ValueError:
         return []
     return sorted(perfiles)
+
+
+def raices_para_so(usuario, ruta_store, so):
+    """Raices de los TRES espacios del usuario para el ``so`` (lectura pura).
+
+    Relee el store y devuelve ``{espacio: raiz}`` con la raiz del ``so``
+    inyectado para cada espacio canonico (raices ausentes → ``None``): es el
+    dato de lectura que el widget usa para renderizar los campos del modo
+    avanzado (mockup) con las rutas ACTUALES del perfil. Usuario sin perfil
+    nuevo, store ausente o corrupto → ``{}`` sin lanzar. Nunca escribe ni
+    toca ``os.environ``.
+    """
+    try:
+        perfiles = rutas_engine.leer_perfiles(ruta_store)
+    except ValueError:
+        return {}
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
+        return {}
+    return {
+        espacio: rutas_engine.ruta_para_espacio(perfil, espacio, so)
+        for espacio in _ESPACIOS
+    }
 
 
 def estado_panel(ruta_store, usuario, so):
@@ -292,6 +326,41 @@ def preparar_cambio_base(usuario, ruta_store, so, espacio, nueva_ruta="", ruta_p
     actualizado = _copia_con_slot(perfil, so, slots)
     rutas_engine.guardar_perfiles(ruta_store, {usuario: actualizado})
     env = injector.armar_estado_env(actualizado, so, ruta_plato, base=base_env)
+    return {
+        "perfil": actualizado,
+        "env": env,
+        "unidad": entorno.estado_unidad(raiz_nueva),
+    }
+
+
+def guardar_base_unificada(usuario, ruta_store, so, base="", ruta_plato=""):
+    """Persiste UNA base en los TRES espacios del ``so`` (modo simple, mockup).
+
+    Es el corte de escritura del modo SIMPLE del widget: una sola base de
+    proyecto rellena el slot ``(espacio, so)`` de cada espacio canonico con
+    ``{base}/{ESPACIO}`` (``crear_perfil_default``, misma regla que el modo
+    TODOS transitorio de ``preparar_cambio_base``). READ-MERGE-WRITE bajo el
+    lock de ``guardar_perfiles``: otros SO, otras raices (otros espacios del
+    mismo SO se reemplazan por diseno) y otros usuarios quedan intactos.
+
+    Base vacia → ``ValueError`` (``_normalizar_ruta``); sin perfil nuevo →
+    ``ValueError`` claro (nunca onboarding silencioso). El env sale de
+    ``armar_estado_env`` con la base como PROJECT_ROOT (fallback del corte).
+    Devuelve ``{"perfil", "env", "unidad"}`` y NO toca ``os.environ``: la
+    propagacion la hace el widget.
+    """
+    raiz_nueva = _normalizar_ruta(base)
+    perfiles = rutas_engine.leer_perfiles(ruta_store)
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
+        raise ValueError(
+            f"No hay perfil activo para '{usuario}': complete el onboarding primero"
+        )
+    perfil_slot = rutas_engine.crear_perfil_default(base=raiz_nueva)
+    slots = {esp: perfil_slot[esp][so] for esp in _ESPACIOS}
+    actualizado = _copia_con_slot(perfil, so, slots)
+    rutas_engine.guardar_perfiles(ruta_store, {usuario: actualizado})
+    env = injector.armar_estado_env(actualizado, so, ruta_plato, base=raiz_nueva)
     return {
         "perfil": actualizado,
         "env": env,
