@@ -20,6 +20,13 @@ computa perfiles ni escribe el entorno por su cuenta.
   el env via injector; otras raices intactas.
 * REQ-5 (escenarios "no GUI degrades silently") — ``abrir_dialogo()`` sin
   sesion grafica o sin PySide degrada en silencio.
+* S5 para nombres editables — onboarding con campo de nombre pre-llenado con
+  el usuario (editable): crea el perfil con ESE nombre y deja la seleccion
+  por estacion; nombre vacio no crea.
+* S5 renombrar — re-key conserva las 9 raices y refresca el combo; nombre
+  existente se informa sin romper.
+* S5 preseleccion por estacion — seleccion guardada > usuario > primer
+  perfil; aplicar una seleccion guarda la eleccion local.
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026/CINE/...``,
 ``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``).
@@ -288,7 +295,7 @@ def test_abrir_dialogo_refresca_lista_perfiles_al_abrir(monkeypatch, tmp_path):
     construidos = []
 
     class _Registro:
-        def __init__(self, estado, usuario, ruta_store, so, perfiles=None, parent=None):
+        def __init__(self, estado, usuario, ruta_store, so, perfiles=None, parent=None, seleccion_path=None):
             construidos.append(list(perfiles or []))
             self._user = usuario
 
@@ -433,7 +440,8 @@ def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_
     estado = path_manager.estado_panel(ruta, "nuevo", "macOS")
     assert estado["conocido"] is False
     dialogo = path_manager_panel.PathManagerDialog(
-        estado, "nuevo", ruta, "macOS", perfiles=["pedro"]
+        estado, "nuevo", ruta, "macOS",
+        perfiles=["pedro"], seleccion_path=str(tmp_path / "seleccion.json"),
     )
     qtbot.addWidget(dialogo)
 
@@ -526,3 +534,233 @@ def test_abrir_dialogo_sin_pyside_no_levanta(monkeypatch):
     )
     assert res is None
     assert fake.messages == []
+
+
+# ---------------------------------------------------------------------------
+# Seleccion por estacion: preseleccion guardada > usuario > primero
+# ---------------------------------------------------------------------------
+
+
+def test_combo_preselecciona_seleccion_guardada(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    path_manager.guardar_seleccion(ruta, "pedro", seleccion_path=sel)
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.combo_perfiles.currentText() == "pedro"
+
+
+def test_combo_preseleccion_guardada_stale_cae_al_usuario(qtbot, monkeypatch, tmp_path):
+    """La seleccion guardada apunta a un perfil borrado: cae a la siguiente regla."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    path_manager.guardar_seleccion(ruta, "fantasma", seleccion_path=sel)
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.combo_perfiles.currentText() == "ana"
+
+
+def test_combo_preselecciona_usuario_si_no_hay_guardada(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.combo_perfiles.currentText() == "ana"
+
+
+def test_combo_preselecciona_primero_sin_usuario_ni_guardada(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "artista", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.combo_perfiles.currentText() == "ana"
+
+
+# ---------------------------------------------------------------------------
+# Seleccion por estacion: aplicar un perfil guarda la seleccion local
+# ---------------------------------------------------------------------------
+
+
+def test_aplicar_seleccion_guarda_seleccion(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.combo_perfiles.setCurrentIndex(1)  # selecciona "pedro"
+
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) == "pedro"
+
+
+# ---------------------------------------------------------------------------
+# Onboarding con nombre editable (campo pre-llenado con el usuario, editable)
+# ---------------------------------------------------------------------------
+
+
+def test_onboarding_campo_nombre_prellenado_y_editable(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+
+    estado = path_manager.estado_panel(ruta, "artista", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "artista", ruta, "macOS",
+        perfiles=["pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.campo_nombre.text() == "artista"
+    dialogo.campo_nombre.setText("artista_color")
+    assert dialogo.campo_nombre.text() == "artista_color"
+
+
+def test_onboarding_nombre_editable_crea_perfil_con_ese_nombre(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    _, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+
+    estado = path_manager.estado_panel(ruta, "artista", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "artista", ruta, "macOS",
+        perfiles=["pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.campo_nombre.setText("artista_color")
+    dialogo.campo_base.setText("/Volumes/estudio/2026")
+    dialogo.boton_onboarding.click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert "artista_color" in guardado
+    assert "artista" not in guardado
+    assert guardado["artista_color"]["COMP"]["macOS"] == "/Volumes/estudio/2026/COMP"
+    assert aplicados[-1]["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) == "artista_color"
+    assert fake_nuke.messages, "el onboarding debe informar via nuke.message"
+
+
+def test_onboarding_nombre_vacio_no_crea(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+
+    estado = path_manager.estado_panel(ruta, "artista", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "artista", ruta, "macOS",
+        perfiles=["pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.campo_nombre.setText("   ")
+    dialogo.campo_base.setText("/Volumes/estudio/2026")
+    dialogo.boton_onboarding.click()
+
+    assert "artista" not in rutas_engine.leer_perfiles(ruta)
+    assert fake_nuke.messages, "el nombre vacio se informa"
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado == {"pedro": _ROOT_2026}
+
+
+# ---------------------------------------------------------------------------
+# Renombrar: re-key conservando las 9 raices + combo refrescado
+# ---------------------------------------------------------------------------
+
+
+def test_renombrar_actualiza_combo_y_store(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    monkeypatch.setattr(
+        path_manager_panel.QtWidgets.QInputDialog, "getText",
+        staticmethod(lambda *a, **k: ("artista", True)),
+    )
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.combo_perfiles.setCurrentIndex(0)  # "ana"
+    dialogo.boton_renombrar.click()
+
+    assert dialogo.combo_perfiles.currentText() == "artista"
+    assert _items_combo(dialogo.combo_perfiles) == ["artista", "pedro"]
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert "ana" not in guardado
+    assert guardado == {"artista": _ROOT_2026, "pedro": _ROOT_2026}
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) == "artista"
+    assert fake_nuke.messages, "el rename informa via nuke.message"
+
+
+def test_renombrar_a_nombre_existente_informa_sin_romper(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    sel = str(tmp_path / "seleccion.json")
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    monkeypatch.setattr(
+        path_manager_panel.QtWidgets.QInputDialog, "getText",
+        staticmethod(lambda *a, **k: ("pedro", True)),
+    )
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS",
+        perfiles=["ana", "pedro"], seleccion_path=sel,
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.combo_perfiles.setCurrentIndex(0)  # "ana"
+    dialogo.boton_renombrar.click()
+
+    assert dialogo.combo_perfiles.currentText() == "ana"
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado == {"ana": _ROOT_2026, "pedro": _ROOT_2026}
+    assert "Ya existe" in fake_nuke.messages[-1]

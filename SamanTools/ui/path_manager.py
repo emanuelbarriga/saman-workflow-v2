@@ -44,6 +44,21 @@ y por SO (3x3).
     corte de ESCRITURA (REQ-5, D3) — persiste el perfil via ``asegurar_perfil``
     (lock-safe, slotting de la base inyectada) y devuelve
     ``{"perfil", "env", "unidad"}`` como datos.
+  - ``onboarding_perfil(nombre, ruta_store, base, so, ruta_plato="",
+    seleccion_path=None)`` (S5): wrapper que encadena ``preparar_onboarding``
+    con un NOMBRE LIBRE y ``guardar_seleccion`` — crea el perfil y deja la
+    seleccion activa guardada por estacion.
+  - ``cargar_seleccion(ruta_store, seleccion_path=None)`` (S5): perfil activo
+    guardado EN LA ESTACION (``~/.config/saman/seleccion.json``,
+    ``{"stores": {ruta_store: nombre}}``) o ``None``. Ausente/corrupto/sin
+    entrada para el store → ``None`` sin lanzar.
+  - ``guardar_seleccion(ruta_store, nombre, seleccion_path=None)`` (S5):
+    persiste la seleccion activa de ``ruta_store`` con merge (otros stores
+    intactos) y escritura atomica (tmp + ``os.replace``); devuelve ``bool``.
+  - ``renombrar_perfil(ruta_store, nombre_viejo, nombre_nuevo)`` (S5): re-key
+    de un perfil conservando las 9 raices (TO_VFX/COMP/FROM_VFX x 3 SO) con
+    READ-RENAME-WRITE bajo el lock del motor; ``ValueError`` claro si el viejo
+    no existe o el nuevo ya esta tomado. Devuelve el store interno actualizado.
 
 Determinismo: inputs identicos → salidas identicas (el unico dato vivo,
 ``entorno.estado_unidad``, respeta timeout + cache del motor). Ninguna ruta
@@ -51,7 +66,10 @@ real del estudio: solo raices ficticias (``/Volumes/estudio/2026``,
 ``L:/VFX/2026``, ``/mnt/estudio/2026``).
 """
 
+import json
+import os
 import re
+import tempfile
 
 from ..core import entorno
 from ..core import rutas_engine
@@ -59,6 +77,10 @@ from . import injector
 
 # Orden canonico de los tres espacios (mismo del motor).
 _ESPACIOS = ("TO_VFX", "COMP", "FROM_VFX")
+
+# Seleccion activa POR ESTACION (local): nunca viaja en el store del
+# proyecto, vive en ~/.config/saman/seleccion.json (parametrizable para tests).
+_RUTA_SELECCION_DEFAULT = os.path.join("~", ".config", "saman", "seleccion.json")
 
 
 def _raiz_para_so(perfil, so):
@@ -300,3 +322,124 @@ def preparar_onboarding(usuario, ruta_store, base, so, ruta_plato=""):
         "env": env,
         "unidad": entorno.estado_unidad(base_norm),
     }
+
+
+# --- Seleccion activa por estacion (local, nunca en el store del proyecto) ----
+
+
+def _ruta_seleccion(seleccion_path):
+    """Ruta del archivo de seleccion: la inyectada o la default por estacion."""
+    if seleccion_path:
+        return os.path.abspath(str(seleccion_path))
+    return os.path.expanduser(_RUTA_SELECCION_DEFAULT)
+
+
+def _leer_datos_seleccion(ruta):
+    """JSON de seleccion como dict; ausente/corrupto/no-dict → ``{}``."""
+    try:
+        with open(ruta, "r", encoding="utf-8") as fh:
+            datos = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def cargar_seleccion(ruta_store, seleccion_path=None):
+    """Perfil activo guardado para ``ruta_store`` (por estacion, local).
+
+    Lee ``~/.config/saman/seleccion.json`` con forma ``{"stores": {"<ruta_
+    store>": "<nombre_perfil>"}}`` y devuelve el nombre o ``None`` (archivo
+    ausente, corrupto, sin envelope o sin entrada para ese store). La ruta
+    es parametrizable (``seleccion_path``) para tests. Puro: no muta el store
+    de perfiles ni ``os.environ``.
+    """
+    ruta = _ruta_seleccion(seleccion_path)
+    datos = _leer_datos_seleccion(ruta)
+    stores = datos.get("stores")
+    if not isinstance(stores, dict):
+        return None
+    nombre = stores.get(str(ruta_store))
+    if not isinstance(nombre, str) or not nombre.strip():
+        return None
+    return nombre
+
+
+def guardar_seleccion(ruta_store, nombre, seleccion_path=None):
+    """Persiste el perfil activo de ``ruta_store`` (merge atomico, local).
+
+    Merge sobre ``~/.config/saman/seleccion.json``: los otros stores
+    guardados se conservan y solo cambia la entrada de ``ruta_store``.
+    Escritura atomica (tmp del mismo directorio + ``os.replace``), parent
+    dirs creados lazy. Devuelve ``True`` si persiste; ``False`` si el nombre
+    no es valido o la escritura falla. Nunca toca el store de perfiles.
+    """
+    if not isinstance(nombre, str) or not nombre.strip():
+        return False
+    ruta = _ruta_seleccion(seleccion_path)
+    datos = _leer_datos_seleccion(ruta)
+    stores = datos.get("stores")
+    if not isinstance(stores, dict):
+        stores = {}
+        datos["stores"] = stores
+    stores[str(ruta_store)] = nombre.strip()
+    contenido = json.dumps(datos, ensure_ascii=False, indent=2)
+    try:
+        directorio = os.path.dirname(os.path.abspath(ruta)) or "."
+        os.makedirs(directorio, exist_ok=True)
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(
+                prefix=os.path.basename(ruta) + ".", suffix=".tmp", dir=directorio
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(contenido)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, ruta)
+            tmp = None  # ya reemplazado: nada que limpiar
+        finally:
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    except OSError:
+        return False
+    return True
+
+
+# --- Renombrar perfil (re-key de las 9 raices, lock del motor) ---------------
+
+
+def renombrar_perfil(ruta_store, nombre_viejo, nombre_nuevo):
+    """Renombra un perfil conservando sus 9 raices; puro pero lock-guarded.
+
+    Validacion de lectura clara sin escribir (nombre viejo inexistente,
+    nombre nuevo ya tomado, nombre vacio o sin cambio → ``ValueError``) y
+    delegacion del READ-RENAME-WRITE ATOMICO al motor
+    (``renombrar_perfil_store``: re-lee y re-valida BAJO el lock, D3, y
+    escribe con tmp + ``os.replace``). Devuelve el dict interno actualizado.
+    """
+    if not isinstance(nombre_nuevo, str) or not nombre_nuevo.strip():
+        raise ValueError("El nombre del perfil no puede estar vacio")
+    if nombre_viejo == nombre_nuevo:
+        raise ValueError("El nombre del perfil no cambia")
+    perfiles = rutas_engine.leer_perfiles(ruta_store)
+    if nombre_viejo not in perfiles:
+        raise ValueError(f"No existe el perfil '{nombre_viejo}'")
+    if nombre_nuevo in perfiles:
+        raise ValueError(f"Ya existe un perfil llamado '{nombre_nuevo}'")
+    return rutas_engine.renombrar_perfil_store(ruta_store, nombre_viejo, nombre_nuevo)
+
+
+def onboarding_perfil(nombre, ruta_store, base, so, ruta_plato="", seleccion_path=None):
+    """Onboarding con nombre libre + seleccion activa por estacion (wrapper).
+
+    Encadena ``preparar_onboarding`` (asegurar_perfil con lock y slotting de
+    la base) y ``guardar_seleccion`` (persiste la seleccion activa de este
+    store en la estacion local). Devuelve el mismo contrato de datos
+    ``{"perfil", "env", "unidad"}`` sin tocar ``os.environ``.
+    """
+    resultado = preparar_onboarding(nombre, ruta_store, base, so, ruta_plato)
+    guardar_seleccion(ruta_store, nombre, seleccion_path)
+    return resultado

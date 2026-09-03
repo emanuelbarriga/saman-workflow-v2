@@ -33,6 +33,15 @@ usuario con raices independientes por espacio y por SO.
 * Perfil selection (spec S3): ``preparar_seleccion_perfil`` devuelve
   ``{"perfil", "env", "unidad"}`` sin escribir; usuario inexistente/legacy →
   ``ValueError`` (la seleccion no es creacion, nunca onboarding).
+* Seleccion por estacion (S5): ``cargar_seleccion`` (ausente/corrupto/sin
+  entrada → ``None``) y ``guardar_seleccion`` (merge atomico conservando
+  otros stores, sin tocar el store de perfiles ni el env).
+* Renombrar (S5): ``renombrar_perfil`` re-keyea conservando las 9 raices
+  (TO_VFX/COMP/FROM_VFX x 3 SO) bajo el lock del motor; nombre nuevo ya
+  tomado, viejo inexistente, nombre vacio o sin cambio → ``ValueError`` sin
+  escribir.
+* Onboarding con nombre libre (S5): ``onboarding_perfil`` crea (asegurar
+  perfil) Y deja activa la seleccion por estacion.
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026/CINE/...``,
 ``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``); ninguna ruta real
@@ -530,3 +539,163 @@ def test_onboarding_slotting_linux(monkeypatch, tmp_path):
     assert store["nuevo"]["COMP"]["macOS"] == "/Volumes/estudio/2026/CINE/COMP"
     assert res["perfil"] == store["nuevo"]
     assert res["env"]["PROJECT_ROOT"] == "/mnt/estudio/2027"
+
+
+# --- Seleccion por estacion (local, nunca en el store del proyecto) ---------
+
+
+def test_cargar_seleccion_archivo_ausente_none(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = str(tmp_path / "seleccion.json")
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) is None
+
+
+def test_cargar_seleccion_json_corrupto_none(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    sel.write_text("{no es json", encoding="utf-8")
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) is None
+
+
+def test_cargar_seleccion_json_sin_envelope_none(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    sel.write_text('{"otra_clave": 1}', encoding="utf-8")
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) is None
+
+
+def test_cargar_seleccion_valor_devuelve_nombre(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    sel.write_text(json.dumps({"stores": {ruta: "ana"}}), encoding="utf-8")
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) == "ana"
+
+
+def test_cargar_seleccion_solo_para_ese_store(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    otro = str(tmp_path / "otro_store.json")
+    sel = tmp_path / "seleccion.json"
+    sel.write_text(json.dumps({"stores": {otro: "pedro"}}), encoding="utf-8")
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) is None
+
+
+def test_cargar_seleccion_no_muta_env_ni_store(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    sel.write_text(json.dumps({"stores": {ruta: "ana"}}), encoding="utf-8")
+    env_antes = _snapshot_env()
+    antes = _bytes_store(tmp_path)
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) == "ana"
+    assert _snapshot_env() == env_antes
+    assert _bytes_store(tmp_path) == antes
+
+
+def test_guardar_seleccion_merge_conserva_otros_stores(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    otro = str(tmp_path / "otro_store.json")
+    sel = tmp_path / "seleccion.json"
+    assert path_manager.guardar_seleccion(otro, "pedro", seleccion_path=str(sel)) is True
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    assert path_manager.guardar_seleccion(ruta, "ana", seleccion_path=str(sel)) is True
+    datos = json.loads(sel.read_text(encoding="utf-8"))
+    assert datos["stores"] == {otro: "pedro", ruta: "ana"}
+    assert path_manager.cargar_seleccion(otro, seleccion_path=str(sel)) == "pedro"
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) == "ana"
+    # La seleccion local no toca el store de perfiles del proyecto.
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": _ROOTS}
+
+
+def test_guardar_seleccion_sobrescribe_mismo_store(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS, "pedro": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    path_manager.guardar_seleccion(ruta, "ana", seleccion_path=str(sel))
+    path_manager.guardar_seleccion(ruta, "pedro", seleccion_path=str(sel))
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=str(sel)) == "pedro"
+
+
+def test_guardar_seleccion_atomico_sin_tmp_residuales(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = tmp_path / "seleccion.json"
+    path_manager.guardar_seleccion(ruta, "ana", seleccion_path=str(sel))
+    path_manager.guardar_seleccion(ruta, "pedro", seleccion_path=str(sel))
+    restos = [p for p in tmp_path.iterdir() if p.suffix == ".tmp"]
+    assert restos == []
+    assert json.loads(sel.read_text(encoding="utf-8"))["stores"][ruta] == "pedro"
+
+
+def test_guardar_seleccion_nombre_vacio_false(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    sel = str(tmp_path / "seleccion.json")
+    assert path_manager.guardar_seleccion(ruta, "   ", seleccion_path=sel) is False
+
+
+# --- Renombrar perfil (re-key de las 9 raices, lock del motor) --------------
+
+
+def test_renombrar_perfil_conserva_nueve_raices(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS, "pedro": _ROOTS})
+    store = path_manager.renombrar_perfil(ruta, "ana", "artista")
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado == {"artista": _ROOTS, "pedro": _ROOTS}
+    assert store == guardado
+    assert "ana" not in guardado
+
+
+def test_renombrar_perfil_nombre_nuevo_existente_lanza(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS, "pedro": _ROOTS})
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="Ya existe"):
+        path_manager.renombrar_perfil(ruta, "ana", "pedro")
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": _ROOTS, "pedro": _ROOTS}
+
+
+def test_renombrar_perfil_viejo_inexistente_lanza(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="No existe"):
+        path_manager.renombrar_perfil(ruta, "fantasma", "artista")
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": _ROOTS}
+
+
+def test_renombrar_perfil_nombre_vacio_lanza(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    with pytest.raises(ValueError, match="vacio"):
+        path_manager.renombrar_perfil(ruta, "ana", "   ")
+
+
+def test_renombrar_perfil_nombre_sin_cambio_lanza(tmp_path):
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    with pytest.raises(ValueError, match="no cambia"):
+        path_manager.renombrar_perfil(ruta, "ana", "ana")
+
+
+# --- Onboarding con nombre libre + seleccion activa (wrapper) ---------------
+
+
+def test_onboarding_perfil_crea_y_selecciona(monkeypatch, tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    sel = str(tmp_path / "seleccion.json")
+    res = path_manager.onboarding_perfil(
+        "artista", ruta, "/Volumes/estudio/2026", "macOS", seleccion_path=sel
+    )
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert "artista" in guardado
+    assert guardado["artista"]["COMP"]["macOS"] == "/Volumes/estudio/2026/COMP"
+    assert guardado["artista"]["TO_VFX"]["macOS"] == "/Volumes/estudio/2026/TO_VFX"
+    assert guardado["artista"]["COMP"]["Windows"] == "L:/VFX/2026/CINE/COMP"
+    assert guardado["pedro"] == _ROOTS
+    assert res["perfil"] == guardado["artista"]
+    assert res["env"]["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert path_manager.cargar_seleccion(ruta, seleccion_path=sel) == "artista"

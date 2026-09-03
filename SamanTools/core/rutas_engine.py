@@ -335,6 +335,27 @@ def asegurar_perfil(user, path, base=None):
     return perfil_nuevo
 
 
+def renombrar_perfil_store(path, nombre_viejo, nombre_nuevo):
+    """Renombra una clave de perfil bajo lock (READ-RENAME-WRITE atomico).
+
+    Re-key de un perfil conservando SUS 9 raices (3 espacios x 3 SO) y el
+    resto del store intacto. La validacion (viejo ausente / nuevo ya tomado)
+    se hace BAJO el lock sobre el store ACTUAL (D3: no sobre una lectura
+    previa, para no decidir con datos stale). Escribe con tmp + ``os.replace``.
+    Devuelve el dict interno ``perfiles`` resultado.
+    """
+    with _lock_perfiles(path):
+        store = leer_perfiles(path)
+        if nombre_viejo not in store:
+            raise ValueError(f"No existe el perfil '{nombre_viejo}' en el store")
+        if nombre_nuevo in store:
+            raise ValueError(f"Ya existe un perfil llamado '{nombre_nuevo}'")
+        perfil = store.pop(nombre_viejo)
+        store[nombre_nuevo] = perfil
+        _escribir_perfiles(path, store)
+    return store
+
+
 # --- G7: Relativizacion / contexto / entorno (D4/D5) --------------------------
 
 _TOK_PROJECT_ROOT = "[getenv PROJECT_ROOT]"
