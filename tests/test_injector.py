@@ -14,6 +14,9 @@ Este archivo cubre:
   sin corte ni base cae a la root del perfil para el SO explicito (AD7).
   PYTHON_* SIEMPRE = raices del perfil 3x3 para el SO explicito (espacio
   faltante → fallback hermano reconstruir_rutas del motor, AD7).
+* Espacios extra (espacios-extra, PR 5): ``armar_estado_env`` emite
+  ``PYTHON_<extra>`` SORTED despues del trio canonico (D3); un extra sin
+  root para el SO explicito se OMITE — nunca aparece como clave vacia.
 * Cadena de store proyecto-primero (AD5): ``obtener_ruta_store(raiz)`` —
   ``{raiz}/.saman/nuke_profiles.json`` gana SIEMPRE que exista, luego
   ``NUKE_PROFILES_PATH`` -> ``SamanTools.config_local`` (scoped) -> home.
@@ -242,6 +245,40 @@ def test_sin_base_posible_devuelve_env_vacio():
     # Perfil sin la plataforma pedida, sin base inyectada y ruta sin match.
     perfil_parcial = {"COMP": {"Windows": "L:/VFX/2026/CINE/COMP"}}
     assert injector.armar_estado_env(perfil_parcial, "macOS", "") == {}
+
+
+# --- Espacios extra via armar_estado_env (espacios-extra, PR 5) ---------------
+
+
+PERFIL_CON_EXTRAS = dict(PERFIL_TRIPLE)
+PERFIL_CON_EXTRAS["3D"] = {"macOS": "/Volumes/estudio/2026/CINE/3D"}
+PERFIL_CON_EXTRAS["PREVIEW"] = {"macOS": "/Volumes/estudio/2026/CINE/PREVIEW"}
+
+
+def test_armar_estado_env_extras_sorted_tras_canonico():
+    """Spec D3: extras emiten PYTHON_* SORTED despues del trio canonico."""
+    env = injector.armar_estado_env(PERFIL_CON_EXTRAS, "macOS", RUTA_COMP)
+    claves = list(env)
+    # Trio canonico primero (orden _ESPACIOS), luego los extras SORTED.
+    assert claves.index("PYTHON_TO_VFX") < claves.index("PYTHON_3D")
+    assert claves.index("PYTHON_COMP") < claves.index("PYTHON_3D")
+    assert claves.index("PYTHON_FROM_VFX") < claves.index("PYTHON_3D")
+    assert claves.index("PYTHON_3D") < claves.index("PYTHON_PREVIEW")
+    assert env["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
+    assert env["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+
+
+def test_armar_estado_env_extra_sin_root_para_so_se_omite():
+    """Spec D4: extra sin root para el SO explicito se OMITE, nunca ''."""
+    # "3D" y "PREVIEW" solo tienen root macOS; para Windows no hay slot.
+    env = injector.armar_estado_env(PERFIL_CON_EXTRAS, "Windows", "")
+    assert "PYTHON_3D" not in env
+    assert "PYTHON_PREVIEW" not in env
+    # El trio canonico sigue presente con las raices de Windows.
+    assert env["PYTHON_TO_VFX"] == "L:/VFX/2026/CINE/TO_VFX"
+    assert env["PYTHON_COMP"] == "L:/VFX/2026/CINE/COMP"
+    # Nunca una clave con valor vacio (contrato AD7/D4).
+    assert "" not in env.values()
 
 
 # --- H1.2: obtener_ruta_store --------------------------------------------------
