@@ -816,3 +816,342 @@ def test_guardar_base_unificada_legacy_lanza_sin_reescribir(monkeypatch, tmp_pat
         path_manager.guardar_base_unificada("ana", ruta, "macOS", _BASE_SIMPLE)
     assert rutas_engine.leer_perfiles(ruta) == {"ana": _LEGACY}
     assert _bytes_store(tmp_path) == antes
+
+
+# --- Espacios extra: sanitizar nombres (R2/R8, spec panel-helper) ------------
+
+_RAICES_3D = {
+    "macOS": "/Volumes/estudio/2026/CINE/3D",
+    "Windows": "L:/VFX/2026/CINE/3D",
+    "Linux": "/mnt/estudio/2026/CINE/3D",
+}
+_RAICES_PREVIEW = {
+    "macOS": "/Volumes/estudio/2026/CINE/PREVIEW",
+    "Windows": "L:/VFX/2026/CINE/PREVIEW",
+    "Linux": "/mnt/estudio/2026/CINE/PREVIEW",
+}
+_RAICES_MATTE_PAINT = {
+    "macOS": "/Volumes/estudio/2026/CINE/MATTE_PAINT",
+    "Windows": "L:/VFX/2026/CINE/MATTE_PAINT",
+    "Linux": "/mnt/estudio/2026/CINE/MATTE_PAINT",
+}
+
+
+def _perfil_con_extras(perfil, **extras):
+    """Copia del perfil 3x3 mas los espacios extra indicados (sin alias)."""
+    copia = {esp: dict(raices) for esp, raices in perfil.items()}
+    for clave, raices in extras.items():
+        copia[clave] = dict(raices)
+    return copia
+
+
+def test_sanitizar_espacio_extra_valido_devuelve_clave():
+    """Spec: ``3D``→``3D`` y ``matte paint``→``MATTE_PAINT``."""
+    perfil = _perfil_con_extras(_ROOTS)
+    assert path_manager.sanitizar_espacio_extra("3D", perfil) == "3D"
+    assert path_manager.sanitizar_espacio_extra("matte paint", perfil) == "MATTE_PAINT"
+
+
+@pytest.mark.parametrize("nombre", ["comp", "to_vfx", "from_vfx"])
+def test_sanitizar_espacio_extra_dup_canonica_rechaza(nombre):
+    """Spec: el resultado igual a un espacio canonico (case-insensitive) lanza."""
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra(nombre, _perfil_con_extras(_ROOTS))
+
+
+@pytest.mark.parametrize("nombre", ["hosts", "default"])
+def test_sanitizar_espacio_extra_hosts_default_rechaza(nombre):
+    """R2: claves legacy ``hosts``/``default`` nunca son espacios extra."""
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra(nombre, _perfil_con_extras(_ROOTS))
+
+
+def test_sanitizar_espacio_extra_project_root_reservado_rechaza():
+    """Spec: el literal ``PROJECT_ROOT`` es una clave reservada."""
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra(
+            "PROJECT_ROOT", _perfil_con_extras(_ROOTS)
+        )
+
+
+def test_sanitizar_espacio_extra_dup_intra_extra_rechaza():
+    """Spec: el nombre ya existe entre los extras del perfil (case-insensitive)."""
+    perfil = _perfil_con_extras(_ROOTS, **{"3D": _RAICES_3D})
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra("3d", perfil)
+
+
+@pytest.mark.parametrize("nombre", ["foo/bar", "{}"])
+def test_sanitizar_espacio_extra_path_like_json_reservado_rechaza(nombre):
+    """R8: nombres con forma de ruta o JSON reservado lanzan ValueError."""
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra(nombre, _perfil_con_extras(_ROOTS))
+
+
+@pytest.mark.parametrize("nombre", ["---", ""])
+def test_sanitizar_espacio_extra_vacio_tras_sanitizar_rechaza(nombre):
+    """Spec: nombre que sanitiza a vacio lanza ValueError."""
+    with pytest.raises(ValueError):
+        path_manager.sanitizar_espacio_extra(nombre, _perfil_con_extras(_ROOTS))
+
+
+# --- Espacios extra: raices_para_so canonico-primero + extras ordenadas (D3) --
+
+
+def test_raices_para_so_extras_canonico_primero_y_ordenadas(tmp_path):
+    """Spec: canonicos en orden _ESPACIOS, luego extras SORTED (D3)."""
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"MATTE_PAINT": _RAICES_MATTE_PAINT, "3D": _RAICES_3D}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    raices = path_manager.raices_para_so("ana", ruta, "macOS")
+    assert list(raices) == [
+        "TO_VFX",
+        "COMP",
+        "FROM_VFX",
+        "3D",
+        "MATTE_PAINT",
+    ]
+    assert raices["3D"] == "/Volumes/estudio/2026/CINE/3D"
+    assert raices["MATTE_PAINT"] == "/Volumes/estudio/2026/CINE/MATTE_PAINT"
+
+
+def test_raices_para_so_extras_determinista(tmp_path):
+    """D3: inputs identicos → dict identico (orden incluido)."""
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"MATTE_PAINT": _RAICES_MATTE_PAINT, "3D": _RAICES_3D}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    r1 = path_manager.raices_para_so("ana", ruta, "Windows")
+    r2 = path_manager.raices_para_so("ana", ruta, "Windows")
+    assert r1 == r2
+    assert list(r1) == list(r2)
+    assert r1["3D"] == "L:/VFX/2026/CINE/3D"
+
+
+# --- Espacios extra: preparar_cambio_base acepta extra conocido del perfil ----
+
+
+def test_cambio_base_extra_conocido_slot_3d(monkeypatch, tmp_path):
+    """Spec: ``("3D", "macOS")`` reemplaza SOLO ese slot y el env lleva
+    ``PYTHON_3D`` con la raiz nueva (D5 conserva otros SO del extra)."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"3D": _RAICES_3D, "PREVIEW": _RAICES_PREVIEW}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil, "pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    env_antes = _snapshot_env()
+    res = path_manager.preparar_cambio_base(
+        "ana",
+        ruta,
+        "macOS",
+        "3D",
+        "/Volumes/estudio/2026/CINE/3D/v2",
+    )
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["3D"]["macOS"] == "/Volumes/estudio/2026/CINE/3D/v2"
+    assert store["ana"]["3D"]["Windows"] == "L:/VFX/2026/CINE/3D"
+    assert store["ana"]["3D"]["Linux"] == "/mnt/estudio/2026/CINE/3D"
+    assert store["ana"]["PREVIEW"] == _RAICES_PREVIEW
+    assert store["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2026/CINE/COMP"
+    assert store["pedro"] == _ROOTS
+    assert res["perfil"]["3D"]["macOS"] == "/Volumes/estudio/2026/CINE/3D/v2"
+    assert res["env"]["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D/v2"
+    assert _snapshot_env() == env_antes
+
+
+def test_cambio_base_extra_conocido_slot_windows_preview(monkeypatch, tmp_path):
+    """Triangulacion: slot (PREVIEW, Windows) reemplazado; resto intacto."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"3D": _RAICES_3D, "PREVIEW": _RAICES_PREVIEW}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    res = path_manager.preparar_cambio_base(
+        "ana",
+        ruta,
+        "Windows",
+        "PREVIEW",
+        "M:/VFX/2026/CINE/PREVIEW/v2",
+    )
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["PREVIEW"]["Windows"] == "M:/VFX/2026/CINE/PREVIEW/v2"
+    assert store["ana"]["PREVIEW"]["macOS"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+    assert store["ana"]["3D"] == _RAICES_3D
+    assert res["env"]["PYTHON_PREVIEW"] == "M:/VFX/2026/CINE/PREVIEW/v2"
+
+
+def test_cambio_base_extra_desconocido_lanza_sin_escribir(tmp_path):
+    """Spec: un espacio que no es canonico NI clave del perfil lanza ValueError."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(_ROOTS, **{"3D": _RAICES_3D})
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="Espacio"):
+        path_manager.preparar_cambio_base(
+            "ana", ruta, "macOS", "NOPE", "/Volumes/estudio/2026/NOPE"
+        )
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": perfil}
+    assert _bytes_store(tmp_path) == antes
+
+
+def test_cambio_base_canonico_conserva_extras_d5(monkeypatch, tmp_path):
+    """D5: un cambio canonico conserva los extras y sus otras raices."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"3D": _RAICES_3D, "PREVIEW": _RAICES_PREVIEW}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    res = path_manager.preparar_cambio_base(
+        "ana",
+        ruta,
+        "macOS",
+        "COMP",
+        "/Volumes/estudio/2026/CINE2/COMP",
+    )
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2026/CINE2/COMP"
+    assert store["ana"]["3D"] == _RAICES_3D
+    assert store["ana"]["PREVIEW"] == _RAICES_PREVIEW
+    assert res["perfil"]["3D"] == _RAICES_3D
+    assert res["env"]["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
+    assert res["env"]["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+
+
+# --- Espacios extra: agregar / eliminar (spec panel-helper, D7) --------------
+
+
+def test_agregar_espacio_extra_persiste_y_env(monkeypatch, tmp_path):
+    """Spec: agrega ``matte paint`` en macOS; ana conserva canonicos + ``3D``;
+    el env delta trae ``PYTHON_MATTE_PAINT``; sin tocar ``os.environ``."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(_ROOTS, **{"3D": _RAICES_3D})
+    ruta = _escribir_store(tmp_path, {"ana": perfil, "pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    env_antes = _snapshot_env()
+    res = path_manager.agregar_espacio_extra(
+        "ana",
+        ruta,
+        "macOS",
+        "matte paint",
+        "/Volumes/estudio/2026/CINE/MATTEPAINT",
+    )
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"]["MATTE_PAINT"]["macOS"] == "/Volumes/estudio/2026/CINE/MATTEPAINT"
+    assert store["ana"]["COMP"] == _ROOTS["COMP"]
+    assert store["ana"]["3D"] == _RAICES_3D
+    assert store["pedro"] == _ROOTS
+    assert set(res) == {"perfil", "env", "unidad"}
+    assert res["perfil"]["MATTE_PAINT"]["macOS"] == "/Volumes/estudio/2026/CINE/MATTEPAINT"
+    assert res["env"]["PYTHON_MATTE_PAINT"] == "/Volumes/estudio/2026/CINE/MATTEPAINT"
+    assert res["env"]["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
+    assert _snapshot_env() == env_antes
+
+
+def test_agregar_espacio_extra_duplicado_lanza_sin_escribir(tmp_path):
+    """Spec: un nombre que ya es extra del perfil lanza y el store no cambia."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(_ROOTS, **{"3D": _RAICES_3D})
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError):
+        path_manager.agregar_espacio_extra(
+            "ana", ruta, "macOS", "3D", "/Volumes/estudio/2026/CINE/3D/v2"
+        )
+    assert rutas_engine.leer_perfiles(ruta) == {"ana": perfil}
+    assert _bytes_store(tmp_path) == antes
+
+
+def test_agregar_espacio_extra_desconocido_lanza_sin_escribir(monkeypatch, tmp_path):
+    """Contrato del helper: sin perfil nuevo se lanza (nunca extras-only)."""
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="No hay perfil activo"):
+        path_manager.agregar_espacio_extra(
+            "nuevo", ruta, "macOS", "3D", "/Volumes/estudio/2026/CINE/3D"
+        )
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"pedro": _ROOTS}
+
+
+def test_eliminar_espacio_extra_quita_solo_ese_extra(monkeypatch, tmp_path):
+    """Spec: quita ``3D``; canonicos + ``PREVIEW`` intactos; sin os.environ."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(
+        _ROOTS, **{"3D": _RAICES_3D, "PREVIEW": _RAICES_PREVIEW}
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil, "pedro": _ROOTS})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    env_antes = _snapshot_env()
+    res = path_manager.eliminar_espacio_extra("ana", ruta, "3D", "macOS")
+    store = rutas_engine.leer_perfiles(ruta)
+    assert "3D" not in store["ana"]
+    assert store["ana"]["COMP"] == _ROOTS["COMP"]
+    assert store["ana"]["PREVIEW"] == _RAICES_PREVIEW
+    assert store["pedro"] == _ROOTS
+    assert set(res) == {"perfil", "env", "unidad"}
+    assert "3D" not in res["perfil"]
+    assert "PYTHON_3D" not in res["env"]
+    assert res["env"]["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+    assert _snapshot_env() == env_antes
+
+
+def test_eliminar_espacio_extra_con_tres_extras(monkeypatch, tmp_path):
+    """Triangulacion: quita ``PREVIEW`` en Windows y los demas extras sobreviven."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(
+        _ROOTS,
+        **{
+            "3D": _RAICES_3D,
+            "PREVIEW": _RAICES_PREVIEW,
+            "MATTE_PAINT": _RAICES_MATTE_PAINT,
+        },
+    )
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    res = path_manager.eliminar_espacio_extra("ana", ruta, "PREVIEW", "Windows")
+    store = rutas_engine.leer_perfiles(ruta)
+    assert "PREVIEW" not in store["ana"]
+    assert store["ana"]["3D"] == _RAICES_3D
+    assert store["ana"]["MATTE_PAINT"] == _RAICES_MATTE_PAINT
+    assert "PYTHON_PREVIEW" not in res["env"]
+    assert res["env"]["PYTHON_3D"] == "L:/VFX/2026/CINE/3D"
+
+
+def test_eliminar_espacio_extra_inexistente_es_noop(monkeypatch, tmp_path):
+    """El motor no-op por clave ausente: el helper devuelve datos sin romper."""
+    from SamanTools.core import rutas_engine
+
+    perfil = _perfil_con_extras(_ROOTS, **{"3D": _RAICES_3D})
+    ruta = _escribir_store(tmp_path, {"ana": perfil})
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    res = path_manager.eliminar_espacio_extra("ana", ruta, "FANTASMA", "macOS")
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"] == perfil
+    assert set(res) == {"perfil", "env", "unidad"}
+    assert res["perfil"] == perfil
+
+
+def test_eliminar_espacio_extra_desconocido_lanza(tmp_path):
+    from SamanTools.core import rutas_engine
+
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    antes = _bytes_store(tmp_path)
+    with pytest.raises(ValueError, match="No hay perfil activo"):
+        path_manager.eliminar_espacio_extra("nuevo", ruta, "3D", "macOS")
+    assert _bytes_store(tmp_path) == antes
+    assert rutas_engine.leer_perfiles(ruta) == {"pedro": _ROOTS}
