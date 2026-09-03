@@ -68,9 +68,9 @@ both together), so slices stay per-module/per-concern.
 
 ## Group G4 — Extract `limpiar` (Phase 2; PR 4)
 
-- [ ] 4.1 RED/port: `tests/test_limpiar.py` from V1; REPLACE `Review.gizmo` fixture with synthetic inline `.nk`-style sample exercising all three volatile knobs + legit knobs (fictitious only, no studio gizmo — spec core-limpiar).
-- [ ] 4.2 GREEN: copy V1 `SamanTools/limpiar.py` → `SamanTools/core/limpiar.py` (stdlib os/re only); verify no real tokens in docstrings.
-- [ ] 4.3 Verify scenarios: 3 knobs stripped, legit untouched, idempotent, BOM+CRLF preserved, latin-1 `0xE9` survives, unchanged→0 no temp, missing→`FileNotFoundError`, mixed-tree summary, ext filter; suite green; `py_compile`.
+- [x] 4.1 RED/port: `tests/test_limpiar.py` from V1; REPLACE `Review.gizmo` fixture with synthetic inline `.nk`-style sample exercising all three volatile knobs + legit knobs (fictitious only, no studio gizmo — spec core-limpiar).
+- [x] 4.2 GREEN: copy V1 `SamanTools/limpiar.py` → `SamanTools/core/limpiar.py` (stdlib os/re only); verify no real tokens in docstrings.
+- [x] 4.3 Verify scenarios: 3 knobs stripped, legit untouched, idempotent, BOM+CRLF preserved, latin-1 `0xE9` survives, unchanged→0 no temp, missing→`FileNotFoundError`, mixed-tree summary, ext filter; suite green; `py_compile`.
 
 ## Group G5 — Engine: profile store + lock (Phase 2; PR 5)
 
