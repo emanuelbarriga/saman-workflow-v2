@@ -1,19 +1,30 @@
 """
-Tests de SamanTools.ui.injector — slice H1 del cambio load-contract
-(contrato de env actualizado al esquema 3x3 de perfil-por-usuario, S1).
+Tests de SamanTools.ui.injector — slices H1 (load-contract) + S2
+(perfil-por-usuario: cadena de store proyecto-primero + probe anti-hang).
 
 El injector es la capa de carga que ensambla el entorno como DATOS puros
 (``armar_estado_env``) y lo aplica a ``os.environ`` + ``__main__`` en una
-capa fina separada (``aplicar_entorno``). Las funciones puras de H1 NO
-importan nuke: se testean con pytest directo, sin stub, igual que el nucleo.
+capa fina separada (``aplicar_entorno``). NO importa nuke: se testean con
+pytest directo, sin stub, igual que el nucleo.
 
-Este archivo cubre: ensamblado puro con el nuevo contrato (PROJECT_ROOT por
-corte estructural del plato; PYTHON_* = raices del perfil 3x3 para el SO, o
-derivadas de la base inyectada via el hermano reconstruir_rutas, AD7), cadena
-de resolucion de store, aplicacion idempotente, helper de override
-``project_directory`` y la maquinaria de precedencia + cache en memoria
-(sub-parte pura de ``registrar_callbacks``, que llega en H4 al estar ligada a
-nuke.ui). Todas las rutas son ficticias (/Volumes/estudio/2026) o de dev.
+Este archivo cubre:
+
+* Ensamblado puro (S1+S2 al spec): PROJECT_ROOT por CORTE ESTRUCTURAL del
+  plato; la base inyectada es SOLO fallback (nunca pisa un corte valido);
+  sin corte ni base cae a la root del perfil para el SO explicito (AD7).
+  PYTHON_* SIEMPRE = raices del perfil 3x3 para el SO explicito (espacio
+  faltante → fallback hermano reconstruir_rutas del motor, AD7).
+* Cadena de store proyecto-primero (AD5): ``obtener_ruta_store(raiz)`` —
+  ``{raiz}/.saman/nuke_profiles.json`` gana SIEMPRE que exista, luego
+  ``NUKE_PROFILES_PATH`` -> ``SamanTools.config_local`` (scoped) -> home.
+* Probe anti-hang (R2/D6): ``_probe_store`` = ``estado_unidad(dirname)``
+  (subprocess + timeout + cache ~10s del motor) y recien ahi ``os.path.isfile``
+  — un mount muerto cortocircuita sin colgar y JAMAS crea ``.saman/`` en
+  lectura (nace lazy en la primera escritura, bajo lock del motor).
+* Aplicacion idempotente, helper de override ``project_directory`` y la
+  maquinaria de precedencia + cache en memoria (ADR-2/ADR-3).
+
+Todas las rutas son ficticias (/Volumes/estudio/2026, L:/VFX/2026) o de dev.
 """
 
 import json
@@ -25,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from SamanTools.core import entorno
 from SamanTools.core import rutas_engine
 
 # El modulo bajo prueba NO existe todavia en RED: este import lo garantiza.
@@ -156,8 +168,9 @@ def test_untitled_gap_2286_inyecta_base():
         PERFIL_TRIPLE, "macOS", "", base="/Volumes/estudio/2026"
     )
     assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
-    # Con base inyectada las PYTHON_* se derivan del hermano de esa base (AD7).
-    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/COMP"
+    # Spec S2: la base cubre SOLO el PROJECT_ROOT; las PYTHON_* son las raices
+    # del perfil para el SO explicito (ningun espacio del perfil se pierde).
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
 
 
 def test_ruta_fuera_de_toda_root_inyecta_base():
@@ -168,7 +181,34 @@ def test_ruta_fuera_de_toda_root_inyecta_base():
         PERFIL_TRIPLE, "macOS", "/tmp/fuera.nk", base="/Volumes/estudio/2026"
     )
     assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
-    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/TO_VFX"
+    # PYTHON_* del perfil para el SO explicito (spec S2), no del hermano base.
+    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+
+
+def test_base_no_pisa_un_corte_valido():
+    """Spec S2: la base es FALLBACK — un corte estructural presente gana."""
+    env = injector.armar_estado_env(
+        PERFIL_TRIPLE, "macOS", RUTA_COMP, base="/Volumes/estudio/2026/OTRO_COMP"
+    )
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
+    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+
+
+def test_sin_corte_sin_base_raiz_espacio_so():
+    """AD7: untitled sin base -> la root del perfil para el SO explicito."""
+    env = injector.armar_estado_env(PERFIL_TRIPLE, "macOS", "")
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
+
+
+def test_sin_corte_sin_base_primer_espacio_con_so():
+    """Triangulacion: sin TO_VFX para el SO, el fallback va al siguiente espacio."""
+    perfil = {
+        "TO_VFX": {"Windows": "L:/VFX/2026/CINE/TO_VFX"},
+        "COMP": {"macOS": "/Volumes/estudio/2026/CINE/COMP"},
+    }
+    env = injector.armar_estado_env(perfil, "macOS", "")
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE/COMP"
 
 
 def test_determinista_entre_llamadas():
@@ -256,6 +296,152 @@ def test_config_local_sin_valor_cae_a_home(
     monkeypatch.setitem(sys.modules, "SamanTools.config_local", falso)
     esperado = str(tmp_path / ".config" / "saman" / "nuke_profiles.json")
     assert injector.obtener_ruta_store() == esperado
+
+
+# --- S2: cadena proyecto-primero (AD5) + probe anti-hang (R2/D6) --------------
+
+_ESTADO_CONECTADO = {
+    "conectado": True,
+    "ruta": None,
+    "detalle": "Conectado.",
+}
+_ESTADO_DESCONECTADO = {
+    "conectado": False,
+    "ruta": None,
+    "detalle": "Mount colgado (timeout 3s).",
+}
+
+
+def test_store_proyecto_gana_siempre(tmp_path, monkeypatch, sin_config_local_real):
+    """AD5: con ``.saman/nuke_profiles.json`` presente, el store del proyecto
+    gana hasta al env var (la cadena es proyecto-primero)."""
+    raiz = tmp_path / "CINE"
+    store = raiz / ".saman" / "nuke_profiles.json"
+    store.parent.mkdir(parents=True)
+    store.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("NUKE_PROFILES_PATH", "/ficticio/env/nuke_profiles.json")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        entorno, "estado_unidad", lambda r: dict(_ESTADO_CONECTADO, ruta=r)
+    )
+    assert injector.obtener_ruta_store(str(raiz)) == str(store)
+
+
+def test_store_proyecto_sin_archivo_cae_al_env(tmp_path, monkeypatch, sin_config_local_real):
+    """Triangulacion: el dirname responde pero sin ``nuke_profiles.json``
+    el probe falla y la cadena cae al env var."""
+    (tmp_path / "CINE" / ".saman").mkdir(parents=True)
+    monkeypatch.setenv("NUKE_PROFILES_PATH", "/ficticio/env/nuke_profiles.json")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        entorno, "estado_unidad", lambda r: dict(_ESTADO_CONECTADO, ruta=r)
+    )
+    assert (
+        injector.obtener_ruta_store(str(tmp_path / "CINE"))
+        == "/ficticio/env/nuke_profiles.json"
+    )
+
+
+def test_store_proyecto_mount_muerto_cae_al_env(tmp_path, monkeypatch, sin_config_local_real):
+    """R2/D6: mount desconectado -> probe False SIN colgar; cae al env var."""
+    raiz = tmp_path / "CINE"
+    store = raiz / ".saman" / "nuke_profiles.json"
+    store.parent.mkdir(parents=True)
+    store.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("NUKE_PROFILES_PATH", "/ficticio/env/nuke_profiles.json")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(entorno, "estado_unidad", lambda r: dict(_ESTADO_DESCONECTADO))
+    assert injector.obtener_ruta_store(str(raiz)) == "/ficticio/env/nuke_profiles.json"
+
+
+def test_store_proyecto_sin_saman_cae_a_home(tmp_path, monkeypatch, sin_config_local_real):
+    """Sin ``.saman``, sin env ni config_local, la cadena termina en home."""
+    raiz = tmp_path / "CINE"
+    monkeypatch.delenv("NUKE_PROFILES_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(entorno, "estado_unidad", lambda r: dict(_ESTADO_DESCONECTADO))
+    esperado = str(tmp_path / "home" / ".config" / "saman" / "nuke_profiles.json")
+    assert injector.obtener_ruta_store(str(raiz)) == esperado
+
+
+def test_store_raiz_none_o_vacia_no_probea_y_usa_env(monkeypatch, sin_config_local_real, tmp_path):
+    """Sin raiz de proyecto (untitled/fuera de root) la cadena arranca en el env."""
+    monkeypatch.setenv("NUKE_PROFILES_PATH", "/ficticio/env/nuke_profiles.json")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert injector.obtener_ruta_store(None) == "/ficticio/env/nuke_profiles.json"
+    assert injector.obtener_ruta_store("   ") == "/ficticio/env/nuke_profiles.json"
+
+
+def test_probe_mount_muerto_cortocircuita_sin_isfile(monkeypatch):
+    """R2/D6: dirname desconectado -> el probe NO ejecuta ``os.path.isfile``
+    (un stat sobre un mount muerto colgaria; el timeout lo absorbe
+    ``estado_unidad`` y el cortocircuito evita el stat)."""
+    llamadas = {"isfile": 0}
+    real_isfile = os.path.isfile
+
+    def espia_isfile(ruta):
+        llamadas["isfile"] += 1
+        return real_isfile(ruta)
+
+    monkeypatch.setattr(entorno, "estado_unidad", lambda r: dict(_ESTADO_DESCONECTADO))
+    monkeypatch.setattr(os.path, "isfile", espia_isfile)
+    assert (
+        injector._probe_store("/ficticio/proyecto/.saman/nuke_profiles.json") is False
+    )
+    assert llamadas["isfile"] == 0
+
+
+def test_probe_valida_dirname_y_archivo(monkeypatch, tmp_path):
+    """D6: el probe consulta el DIRNAME via estado_unidad y luego el archivo."""
+    padre = tmp_path / "CINE" / ".saman"
+    padre.mkdir(parents=True)
+    ruta = padre / "nuke_profiles.json"
+    ruta.write_text("{}", encoding="utf-8")
+    vistos = []
+
+    monkeypatch.setattr(
+        entorno,
+        "estado_unidad",
+        lambda r: vistos.append(r) or dict(_ESTADO_CONECTADO, ruta=r),
+    )
+    assert injector._probe_store(str(ruta)) is True
+    assert vistos == [str(padre)]
+    # Triangulacion: el dirname responde pero el archivo no existe -> False.
+    assert injector._probe_store(str(padre / "ausente.json")) is False
+
+
+def test_probe_reutiliza_cache_estado_unidad(monkeypatch, tmp_path):
+    """D6: probes repetidos dentro de la cache ~10s no re-verifican el mount.
+
+    La cache vive DENTRO de ``entorno.estado_unidad``: el spy se coloca en
+    ``_verificar_ruta`` (el runner de subprocess) — el segundo probe absorbe
+    el resultado cacheado y el subprocess corre una sola vez.
+    """
+    ruta = tmp_path / "CINE" / ".saman" / "nuke_profiles.json"
+    ruta.parent.mkdir(parents=True)
+    ruta.write_text("{}", encoding="utf-8")
+    real_verificar = entorno._verificar_ruta
+    llamadas = {"n": 0}
+
+    def espia(base):
+        llamadas["n"] += 1
+        return real_verificar(base)
+
+    monkeypatch.setattr(entorno, "_verificar_ruta", espia)
+    assert injector._probe_store(str(ruta)) is True
+    assert injector._probe_store(str(ruta)) is True
+    assert llamadas["n"] == 1
+
+
+def test_probe_no_crea_saman_en_lectura(tmp_path, monkeypatch, sin_config_local_real):
+    """AD6: la cadena de LECTURA nunca crea ``.saman/`` (nace lazy en escritura)."""
+    raiz = tmp_path / "CINE"
+    monkeypatch.delenv("NUKE_PROFILES_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(entorno, "estado_unidad", lambda r: dict(_ESTADO_DESCONECTADO))
+    injector.obtener_ruta_store(str(raiz))
+    assert not (raiz / ".saman").exists()
+    assert not (raiz / ".saman" / "nuke_profiles.json").exists()
 
 
 # --- H1.3: aplicar_entorno (fina, idempotente) ---------------------------------
@@ -349,8 +535,9 @@ def test_precedencia_override_gana():
         env, "/Volumes/estudio/2026/OTRO_COMP", {}
     )
     assert final["PROJECT_ROOT"] == "/Volumes/estudio/2026/OTRO_COMP"
-    # Las PYTHON_* derivadas de la base override (hermano de la raiz) se conservan.
-    assert final["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/OTRO_COMP/TO_VFX"
+    # El override fuerza SOLO el PROJECT_ROOT; las PYTHON_* del perfil quedan
+    # intactas (spec S2: raices del perfil para el SO explicito).
+    assert final["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
     # El guard de precedencia es puro: no escribe nada en os.environ.
     assert dict(os.environ) == env_antes
 

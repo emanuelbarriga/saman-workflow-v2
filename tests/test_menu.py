@@ -28,6 +28,7 @@ Reglas del slice (spec load-ui-menu + ADR-7 + ADR-2/ADR-4/ADR-5):
   - Shim import-safe: un shim que falla al importar no rompe callbacks ni menu.
 """
 
+import json
 import os
 import re
 import sys
@@ -35,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from SamanTools.core import entorno
 from SamanTools.core import rutas_engine
 from SamanTools.ui import injector
 
@@ -153,6 +155,9 @@ def fake_nuke(monkeypatch):
     fake = _NukeFake()
     monkeypatch.setitem(sys.modules, "nuke", fake)
     monkeypatch.delenv("NUKE_PROFILES_PATH", raising=False)
+    # S2/AD5: por defecto el probe del store de proyecto responde negativo —
+    # la raiz ficticia del plato no tiene .saman/ y la cadena cae al env/config.
+    monkeypatch.setattr(injector, "_probe_store", lambda ruta: False)
 
     env_antes = dict(os.environ)
     main_antes = {k: v for k, v in vars(__main__).items() if k.isupper()}
@@ -271,9 +276,11 @@ def test_instalar_repetido_no_duplica_items(menu_mod, fake_nuke):
 def test_flujo_load_perfil_override_y_env_aplicados(menu_mod, fake_nuke, tmp_path, monkeypatch):
     """Load completo: perfil (onboarding a store ficticio) + override manual.
 
-    El override ``project_directory`` gana sobre el corte del plato y sobre
-    las raices del perfil (AD7): PROJECT_ROOT = override y las PYTHON_* se
-    derivan del hermano de esa raiz; el env se cachea y se aplica.
+    El override ``project_directory`` fuerza PROJECT_ROOT via la cadena de
+    precedencia (S2: el corte del plato manda en ``armar_estado_env`` y el
+    override se aplica DESPUES sobre el dict final); las PYTHON_* son las
+    raices del perfil para el SO explicito (spec S2). El env se cachea y se
+    aplica.
     """
     fake_nuke._root = _RootFake(RUTA_COMP, project_directory=OVERRIDE)
     _store_ficticio(tmp_path, monkeypatch)
@@ -282,9 +289,9 @@ def test_flujo_load_perfil_override_y_env_aplicados(menu_mod, fake_nuke, tmp_pat
     fake_nuke.callbacks["load"]()
 
     assert os.environ["PROJECT_ROOT"] == OVERRIDE
-    assert os.environ["PYTHON_TO_VFX"] == OVERRIDE + "/TO_VFX"
-    assert os.environ["PYTHON_COMP"] == OVERRIDE + "/COMP"
-    assert os.environ["PYTHON_FROM_VFX"] == OVERRIDE + "/FROM_VFX"
+    assert os.environ["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert os.environ["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
+    assert os.environ["PYTHON_FROM_VFX"] == "/Volumes/estudio/2026/CINE/FROM_VFX"
     assert injector._env_inyectado is True
     assert injector._env_cache["PROJECT_ROOT"] == OVERRIDE
 
@@ -300,6 +307,59 @@ def test_flujo_load_sin_override_usa_perfil(menu_mod, fake_nuke, tmp_path, monke
     assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
     assert os.environ["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
     assert injector._env_cache["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
+
+
+def test_flujo_load_usa_store_del_proyecto(menu_mod, fake_nuke, tmp_path, monkeypatch):
+    """S2/AD5: el call-site pasa la raiz del proyecto a ``obtener_ruta_store``.
+
+    ``_resolver_contexto_carga`` calcula ``raiz_proyecto`` desde
+    ``nuke.root().name()`` (corte estructural) y la inyecta: con
+    ``.saman/nuke_profiles.json`` presente, el perfil se resuelve en el store
+    DEL PROYECTO (spy de ``resolver_perfil`` captura la ruta) y el env sale
+    del corte del plato.
+    """
+    raiz = tmp_path / "CINE"
+    store = raiz / ".saman" / "nuke_profiles.json"
+    perfil = {
+        espacio: {so: str(raiz / espacio) for so in ("macOS", "Windows", "Linux")}
+        for espacio in ("TO_VFX", "COMP", "FROM_VFX")
+    }
+    store.parent.mkdir(parents=True)
+    store.write_text(json.dumps({"perfiles": {"artista_dev": perfil}}), encoding="utf-8")
+    fake_nuke._root = _RootFake(str(raiz / "COMP" / "ep.nk"))
+    monkeypatch.setattr(menu_mod, "_identidad_ambiental", lambda: ("artista_dev", "devhost"))
+    # Probe REAL sobre tmp_path (filesystem vivo): demuestra la cadena completa.
+    monkeypatch.setattr(injector, "_probe_store", lambda ruta: os.path.isfile(ruta))
+
+    capturas = {}
+
+    def espia_resolver(usuario, ruta):
+        capturas["ruta"] = ruta
+        return perfil
+
+    monkeypatch.setattr(rutas_engine, "resolver_perfil", espia_resolver)
+
+    fake_nuke.callbacks["load"]()
+
+    assert capturas["ruta"] == str(store)
+    assert os.environ["PROJECT_ROOT"] == str(raiz)
+    assert os.environ["PYTHON_COMP"] == str(raiz / "COMP")
+    assert injector._env_cache["PROJECT_ROOT"] == str(raiz)
+
+
+def test_flujo_load_untitled_cae_a_env_y_fallback_so(menu_mod, fake_nuke, tmp_path, monkeypatch):
+    """S2: script untitled (sin raiz de proyecto) -> cadena al env; env con la
+    root del perfil para el SO explicito (fallback AD7, sin corte ni base)."""
+    fake_nuke._root = _RootFake("")
+    _store_ficticio(tmp_path, monkeypatch)
+    monkeypatch.setattr(menu_mod, "_identidad_ambiental", lambda: ("artista_dev", "devhost"))
+    monkeypatch.setattr(entorno, "detectar_so", lambda: "macOS")
+
+    fake_nuke.callbacks["load"]()
+
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert os.environ["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert injector._env_inyectado is True
 
 
 def test_flujo_load_env_preexistente_gana_no_op(menu_mod, fake_nuke, monkeypatch):
@@ -345,9 +405,9 @@ def test_save_rea_afirma_desde_memoria_sin_store(menu_mod, fake_nuke, tmp_path, 
     llamadas_store = {"n": 0}
     original_store = injector.obtener_ruta_store
 
-    def spy_store():
+    def spy_store(*_args, **_kwargs):
         llamadas_store["n"] += 1
-        return original_store()
+        return original_store(*_args, **_kwargs)
 
     monkeypatch.setattr(injector, "obtener_ruta_store", spy_store)
 

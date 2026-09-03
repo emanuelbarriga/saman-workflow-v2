@@ -9,14 +9,16 @@ de modulo (0% coverage aceptado por diseno, ADR-7).
 
   - ``registrar_callbacks``: bind de ``nuke.addOnScriptLoad``/``addOnScriptSave``.
     En load resuelve la identidad ambiental (getpass/socket, permitido en la
-    capa ui), detecta el SO (``core.entorno.detectar_so``), resuelve el store
-    (``obtener_ruta_store``) y el perfil (``resolver_perfil``, con onboarding
-    ficticio si no existe), arma el contexto desde ``nuke.root().name()``, aplica
-    el override manual ``project_directory`` de la root (ADR-5) y decide por la
-    cadena de precedencia (ADR-3: env pre-existente del render farm gana ->
-    override manual gana -> env recien armado del perfil). Al final cachea y
-    aplica el env (``cachear_env`` + ``aplicar_entorno``). En save re-afirma
-    SOLO el env cacheado en memoria (ADR-2: nunca store, lock ni motor).
+    capa ui), detecta el SO (``core.entorno.detectar_so``), calcula la raiz de
+    proyecto por corte estructural (``raiz_proyecto_desde_ruta``), resuelve el
+    store (``obtener_ruta_store(raiz_proyecto)``, AD5 proyecto-primero) y el
+    perfil (``resolver_perfil``, con onboarding ficticio si no existe), arma
+    el contexto desde ``nuke.root().name()``, aplica el override manual
+    ``project_directory`` de la root (ADR-5) y decide por la cadena de
+    precedencia (ADR-3: env pre-existente del render farm gana -> override
+    manual gana -> env recien armado del perfil). Al final cachea y aplica el
+    env (``cachear_env`` + ``aplicar_entorno``). En save re-afirma SOLO el env
+    cacheado en memoria (ADR-2: nunca store, lock ni motor).
   - ``instalar``: registra los callbacks y construye el menu SamanTools >
     Configuracion con UN item de informacion de version; idempotente (no
     duplica items). Los botones de mantenimiento (Actualizar/Desinstalar) los
@@ -108,20 +110,17 @@ def _identidad_ambiental():
 def _resolver_contexto_carga():
     """Resuelve (perfil, override, ruta_plato) del flujo de load, sin efectos.
 
-    Orden: identidad -> store -> perfil (``resolver_perfil`` SOLO por usuario,
-    AD2/AD10 — sin hostname — con onboarding a store ficticio si el perfil no
-    existe) -> contexto del script (``nuke.root().name()``) -> override manual
-    (knob ``project_directory``, ADR-5). Tolerante: cualquier fallo devuelve
+    Orden: ruta del script (``nuke.root().name()``) + override manual (knob
+    ``project_directory``, ADR-5) -> identidad (SOLO usuario, AD2/AD10 — sin
+    hostname) -> raiz de proyecto por CORTE ESTRUCTURAL
+    (``raiz_proyecto_desde_ruta``) inyectada a ``obtener_ruta_store`` (AD5:
+    el store del proyecto gana si existe; la cadena cae al env/config si no)
+    -> perfil (``resolver_perfil`` SOLO por usuario, con onboarding a store
+    ficticio si el perfil no existe). Tolerante: cualquier fallo devuelve
     ``perfil=None`` y el flujo de carga no escribe nada.
     """
-    try:
-        usuario, _hostname = _identidad_ambiental()
-        ruta_store = injector.obtener_ruta_store()
-        perfil = rutas_engine.resolver_perfil(usuario, ruta_store)
-    except Exception:
-        return None, None, ""
-    ruta_plato = ""
     override = None
+    ruta_plato = ""
     try:
         root = nuke.root()
         if root is not None:
@@ -129,6 +128,13 @@ def _resolver_contexto_carga():
             override = injector._override_proyecto_desde_root(root)
     except Exception:
         pass
+    try:
+        usuario, _hostname = _identidad_ambiental()
+        raiz_proyecto = entorno.raiz_proyecto_desde_ruta(ruta_plato)
+        ruta_store = injector.obtener_ruta_store(raiz_proyecto)
+        perfil = rutas_engine.resolver_perfil(usuario, ruta_store)
+    except Exception:
+        return None, None, ""
     return perfil, override, ruta_plato
 
 

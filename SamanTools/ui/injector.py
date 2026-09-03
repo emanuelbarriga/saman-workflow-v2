@@ -1,6 +1,6 @@
 """
 SamanTools.ui.injector - Capa de carga que inyecta el entorno de composicion
-(change load-contract, slice H1).
+(change load-contract, slice H1 + perfil-por-usuario, slice S2).
 
 Divide el trabajo en PURE / THIN:
 
@@ -8,14 +8,27 @@ Divide el trabajo en PURE / THIN:
     (``PROJECT_ROOT`` + ``PYTHON_TO_VFX``/``PYTHON_COMP``/``PYTHON_FROM_VFX``)
     a partir de un perfil 3x3 (espacio → {OS → root}), SO explicito, ruta del
     plato y una base inyectable. NO importa nuke, NO muta ``os.environ`` ni
-    ``__main__``: corrige el gap del motor (issue #2286) donde un script
-    untitled o fuera de toda root no produce corte estructural, usando la
-    base del parametro como ``PROJECT_ROOT``.
-  - ``obtener_ruta_store`` resuelve la ruta del store de perfiles en cadena:
-    ``NUKE_PROFILES_PATH`` (env) -> ``SamanTools.config_local`` (modulo scoped
-    gitignored, atributo o JSON hermano) -> ``~/.config/saman/nuke_profiles.json``.
-    Nunca un ``config_local.py`` en la raiz del repositorio (colision de
-    nombres dentro de Nuke, spec load-injector).
+    ``__main__``. ``PROJECT_ROOT`` es el CORTE ESTRUCTURAL del plato
+    (``raiz_proyecto_desde_ruta``); la base inyectada es SOLO fallback (nunca
+    pisa un corte valido — el override del knob lo aplica ``_aplicar_precedencia``
+    aparte, sobre el dict final); sin corte ni base cae a la root del perfil
+    para el SO explicito (AD7). Las PYTHON_* SIEMPRE son las raices del perfil
+    para el SO EXPLICITO (espacio faltante -> fallback hermano
+    ``reconstruir_rutas`` del motor, AD7; irresoluble -> omitida, nunca "").
+  - ``obtener_ruta_store(raiz_proyecto=None)`` resuelve la ruta del store de
+    perfiles en cadena PROYECTO-PRIMERO (AD5/spec load-injector S2):
+    ``{raiz_proyecto}/.saman/nuke_profiles.json`` -> ``NUKE_PROFILES_PATH``
+    (env) -> ``SamanTools.config_local`` (modulo scoped gitignored, atributo o
+    JSON hermano) -> ``~/.config/saman/nuke_profiles.json``. La raiz la calcula
+    el CALLER (menu/panel) desde ``nuke.root().name()`` via
+    ``raiz_proyecto_desde_ruta``; el store de proyecto GANA SIEMPRE que exista
+    (probe anti-hang, AD6). Nunca un ``config_local.py`` en la raiz del
+    repositorio (colision de nombres dentro de Nuke, spec load-injector).
+  - ``_probe_store`` (R2/D6): verifica el dirname del store con
+    ``entorno.estado_unidad`` (subprocess con timeout + cache ~10s: un mount
+    SMB muerto devuelve ``conectado: False`` en vez de colgar) y SOLO si
+    responde hace ``os.path.isfile``. JAMAS crea ``.saman/`` en lectura (nace
+    lazy en la primera escritura bajo lock, en el motor).
   - ``aplicar_entorno`` es THIN e idempotente: vuelca el dict en
     ``os.environ`` y en ``__main__.__dict__`` (para que el TCL
     ``[getenv PROJECT_ROOT]`` evalua en nodos Read/Write).
@@ -41,6 +54,7 @@ del bootstrap. Ninguna ruta real del estudio: solo raices ficticias
 import json
 import os
 
+from ..core import entorno
 from ..core import rutas_engine
 
 # Cache en memoria del ultimo env inyectado (ADR-2: el save re-afirma desde
@@ -58,33 +72,66 @@ _callbacks_registrados = False
 _CLAVE_PROJECT_ROOT = "PROJECT_ROOT"
 _NOMBRE_KNOB_OVERRIDE = "project_directory"
 _RUTA_STORE_HOME = os.path.join(".config", "saman", "nuke_profiles.json")
+# Store local del proyecto (AD5): se resuelve bajo la raiz del proyecto.
+_RUTA_STORE_PROYECTO_REL = os.path.join(".saman", "nuke_profiles.json")
+# Orden canonico de espacios para el fallback de PROJECT_ROOT (AD7).
+_ESPACIOS_INYECTOR = ("TO_VFX", "COMP", "FROM_VFX")
 
 
 # --- Ensamblado puro -----------------------------------------------------------
 
 
-def armar_estado_env(perfil, so, ruta_plato, base=None):
-    """Ensambla el entorno TCL como dict PURO (spec load-injector, perfil-por-usuario).
+def _raiz_fallback_so(perfil, espacio, so):
+    """Root del perfil para ``so`` como ``PROJECT_ROOT`` degradado (AD7).
 
-    ``perfil`` es 3x3 (espacio → {OS → root}). La raiz de proyecto es el
-    CORTE ESTRUCTURAL del plato (``raiz_proyecto_desde_ruta``); si se inyecta
-    ``base`` (override manual del knob ``project_directory``, ADR-5), esa base
-    GANA al corte como ``PROJECT_ROOT``; el SO se fuerza al inyectado si el
-    contexto no lo resolvio (scripts untitled o fuera de toda root). Con
-    ``base`` inyectada el proyecto manda sobre las raices del perfil (AD7):
-    las PYTHON_* se derivan del hermano ``reconstruir_rutas`` de la raiz
-    resuelta. Sin ``base``, las PYTHON_* son las raices del perfil para el SO.
-    No muta ``os.environ`` ni ``__main__``; idem inputs -> idem outputs.
+    Fallback FINAL de la cadena de ``PROJECT_ROOT`` (corte estructural ->
+    base inyectada -> aqui), para scripts untitled o fuera de toda root sin
+    base: usa la root del ESPACIO del contexto si existe para ``so``; si no,
+    la PRIMERA root del perfil con plataforma ``so`` (orden canonico TO_VFX,
+    COMP, FROM_VFX). Devuelve la root tal cual (spec S2: "current-SO space
+    root"). Sin match -> ``None`` (y las PYTHON_* seguiran la cadena AD7
+    del motor). Pura: no toca filesystem ni entorno.
+    """
+    if not isinstance(perfil, dict):
+        return None
+    if espacio:
+        root = rutas_engine.ruta_para_espacio(perfil, espacio, so)
+        if root:
+            return str(root).replace("\\", "/").strip().rstrip("/")
+    for espacio_c in _ESPACIOS_INYECTOR:
+        root = rutas_engine.ruta_para_espacio(perfil, espacio_c, so)
+        if root:
+            return str(root).replace("\\", "/").strip().rstrip("/")
+    return None
+
+
+def armar_estado_env(perfil, so, ruta_plato, base=None):
+    """Ensambla el entorno TCL como dict PURO (spec load-injector S2).
+
+    ``perfil`` es 3x3 (espacio → {OS → root}). ``PROJECT_ROOT`` es el CORTE
+    ESTRUCTURAL del plato (via ``get_context``); si el plato no produce corte
+    (untitled o fuera de toda root) cae a la ``base`` inyectada y, si tampoco
+    hay base, a la root del perfil para el SO explicito (``_raiz_fallback_so``,
+    AD7). La base NUNCA pisa un corte valido: el override manual del knob
+    ``project_directory`` se aplica aparte (``_aplicar_precedencia``) sobre el
+    dict final. Las PYTHON_* SIEMPRE son las raices del perfil para el SO
+    EXPLICITO (espacio faltante → fallback hermano ``reconstruir_rutas`` del
+    motor; irresoluble → omitida, nunca ``""``). No muta ``os.environ`` ni
+    ``__main__``; idem inputs -> idem outputs.
     """
     contexto = rutas_engine.get_context(perfil, ruta_plato)
-    if base is not None:
-        # La base inyectada es un override (knob project_directory): GANA al
-        # corte estructural (ADR-3/ADR-5), igual que en el contrato V1.
-        contexto["project_root"] = base
-    if not contexto.get("so"):
-        contexto["so"] = so
-    perfil_para_env = None if base is not None else perfil
-    return rutas_engine.variables_entorno(contexto, perfil=perfil_para_env)
+    if not contexto.get("project_root"):
+        if base is not None and str(base).strip():
+            contexto["project_root"] = (
+                str(base).replace("\\", "/").strip().rstrip("/") or None
+            )
+        else:
+            contexto["project_root"] = _raiz_fallback_so(
+                perfil, contexto.get("espacio"), so
+            )
+    # El SO explicito manda sobre el derivado del prefijo (spec S2).
+    contexto["so"] = so
+    return rutas_engine.variables_entorno(contexto, perfil=perfil)
 
 
 # --- Resolucion del store de perfiles ------------------------------------------
@@ -125,14 +172,44 @@ def _leer_config_local():
     return None
 
 
-def obtener_ruta_store():
-    """Resuelve la ruta del store de perfiles (spec load-injector, ADR-6).
+def _probe_store(ruta):
+    """Probe anti-hang de un store de proyecto (R2/D6): no cuelga, no crea nada.
 
-    Cadena: ``NUKE_PROFILES_PATH`` (env) -> ``SamanTools.config_local``
-    scoped -> ``~/.config/saman/nuke_profiles.json`` (default final; el
-    onboarding persiste raices ficticias ahi). Nunca un modulo
-    ``config_local`` en la raiz del repositorio.
+    Verifica el DIRNAME del store (``{raiz}/.saman``) con
+    ``entorno.estado_unidad`` — subprocess con timeout y cache ~10s a nivel de
+    modulo: un mount SMB muerto devuelve ``conectado: False`` en vez de
+    colgar — y SOLO si responde hace ``os.path.isfile(ruta)``. El cortocircuito
+    garantiza que ``os.path.isfile`` (que tambien puede colgarse en un mount
+    muerto) NUNCA corre sobre un dirname desconectado. ``estado_unidad`` solo
+    hace ``ls -d``/``dir``: JAMAS crea ``.saman/`` en lectura (AD6 — el
+    directorio nace lazy en la primera escritura bajo lock, en el motor).
     """
+    if not ruta:
+        return False
+    padre = os.path.dirname(str(ruta)) or "."
+    if not entorno.estado_unidad(padre)["conectado"]:
+        return False
+    return os.path.isfile(str(ruta))
+
+
+def obtener_ruta_store(raiz_proyecto=None):
+    """Resuelve la ruta del store de perfiles (spec load-injector S2, AD5).
+
+    Cadena PROYECTO-PRIMERO: ``{raiz_proyecto}/.saman/nuke_profiles.json``
+    (el store del proyecto GANA SIEMPRE que exista, probe anti-hang AD6) ->
+    ``NUKE_PROFILES_PATH`` (env) -> ``SamanTools.config_local`` scoped ->
+    ``~/.config/saman/nuke_profiles.json`` (default final; el onboarding
+    persiste raices ficticias ahi). La ``raiz_proyecto`` la calcula el CALLER
+    (menu/panel) desde ``nuke.root().name()`` via ``raiz_proyecto_desde_ruta``;
+    sin raiz (untitled/fuera de toda root) la cadena arranca en el env. Nunca
+    un modulo ``config_local`` en la raiz del repositorio.
+    """
+    if raiz_proyecto:
+        raiz = str(raiz_proyecto).strip().rstrip("/\\")
+        if raiz:
+            ruta_proyecto = os.path.join(raiz, _RUTA_STORE_PROYECTO_REL)
+            if _probe_store(ruta_proyecto):
+                return ruta_proyecto
     desde_env = os.environ.get("NUKE_PROFILES_PATH")
     if desde_env and str(desde_env).strip():
         return str(desde_env)
