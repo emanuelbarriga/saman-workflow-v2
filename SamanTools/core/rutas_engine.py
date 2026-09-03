@@ -1,60 +1,61 @@
 """
-SamanTools.core.rutas_engine - Motor de rutas de composicion V2 (slices G5+G6).
+SamanTools.core.rutas_engine - Motor de rutas de composicion V2 (perfil-por-usuario, S1).
 
-Partes 1 y 2 del motor: STORE de perfiles JSON + LOCK (esquema D1, lock D6) y
-RESOLUCION por precedencia + ONBOARDING bajo lock (D2/D3). Este archivo
-implementa:
+El motor opera con el esquema D1/AD1: un store ``nuke_profiles.json`` con
+envelope ``{"perfiles": {usuario: {TO_VFX|COMP|FROM_VFX: {macOS|Windows|Linux:
+root}}}}`` — SIN hostname ni escalera (AD2; la resolucion es SOLO por usuario).
+Los tres espacios son INDEPENDIENTES (pueden vivir en discos distintos) y cada
+uno tiene su root por plataforma.
 
-  - ``leer_perfiles`` / ``guardar_perfiles``: store ``nuke_profiles.json`` con
-    envelope ``{"perfiles": {usuario: {"hosts": {host: roots}, "default": roots}}}``.
-    Escritura ATOMICA (temporal en el mismo directorio + ``os.replace``) y, bajo
-    lock, READ-MERGE-WRITE por usuario: nunca se reemplaza a ciegas el perfil de
-    otro usuario ni hosts ya conocidos.
-  - ``crear_perfil_default``: roots ficticias por plataforma con slotting por
-    forma de la base inyectada (``/Volumes/`` → macOS, ``^[A-Za-z]:`` → Windows,
-    ``/mnt/`` → Linux; si ninguna coincide, se conservan las tres ficticias).
-  - ``_emparejar_perfil``: escalera de precedencia D2 — par exacto
-    user+hostname → user-only ``default`` → primer usuario en orden de documento
-    con ese hostname → ``None`` (marcador de onboarding; la API publica lo
-    absorbe y nunca lo expone).
-  - ``resolver_perfil``: lee (sin lock) y empareja; desconocido → onboarding
-    via ``asegurar_perfil``. NUNCA lanza por desconocido ni devuelve ``None``.
-  - ``asegurar_perfil``: onboarding bajo el lock: relee y re-resuelve (carrera
-    ganada → devuelve el perfil del ganador sin reescribir); si no, merge por
-    usuario (``hosts[hostname]`` + ``default``) y escritura atomica.
-  - ``ruta_para_plataforma``: raiz del perfil para macOS/Windows/Linux; ``None``
-    si la plataforma no esta en el perfil (sin raise).
-  - ``_lock_perfiles``: context manager de lock EXCLUSIVO sobre un archivo
-    HERMANO ``path + ".lock"`` — nunca el target: ``os.replace`` cambia el inode
-    del target y un lock ahi quedaria huerfano tras la primera escritura.
-    fcntl (POSIX) / msvcrt (Windows) / no-op documentado; 3 intentos de <=2.0 s
-    y TimeoutError al agotar (nunca overwrite silencioso).
-  - ``_lock_clase``: factory con plataforma inyectada para testear ambas ramas
-    (fcntl y msvcrt) en cualquier maquina de desarrollo.
-
-Parte 3 (slices G7): mapeo relativizacion + contexto + entorno:
-
+  - ``leer_perfiles`` / ``guardar_perfiles``: lectura con envelope; escritura
+    ATOMICA (temporal en el mismo directorio + ``os.replace``) y, bajo lock,
+    READ-MERGE-WRITE POR ESPACIO: nunca se reemplaza a ciegas otro espacio ni
+    otro usuario; una entrada legacy (``hosts``/``default`` sin espacios) se
+    REEMPLAZA por la forma nueva en la escritura (AD1). ``.saman/`` se crea
+    lazy bajo lock (``os.makedirs(dirname, exist_ok=True)``), nunca en lectura.
+  - ``detectar_forma_perfil``: purga — ``"nuevo"`` si hay al menos un espacio
+    valido; ``"legacy"`` en caso contrario (hosts/default o sin datos). Es el
+    flag solo-lectura que la UI usara para advertir la regeneracion.
+  - ``crear_perfil_default``: perfil 3x3 con raices ficticias
+    (``/Volumes/estudio/2026/CINE/{ESPACIO}``, ``L:/VFX/2026/CINE/{ESPACIO}``,
+    ``/mnt/estudio/2026/CINE/{ESPACIO}``) y slotting de la base inyectada por
+    forma (``/Volumes/`` → macOS, ``^[A-Za-z]:`` → Windows, ``/mnt/`` → Linux):
+    el SO del slot rellena los tres espacios con ``{base}/{ESPACIO}``.
+  - ``ruta_para_espacio``: root del espacio para la plataforma o ``None``.
+  - ``resolver_perfil(user, path)``: ``perfiles.get(user)`` directo (sin
+    escalera); desconocido o legacy → onboarding via ``asegurar_perfil``.
+    NUNCA lanza por desconocido ni devuelve ``None``.
+  - ``asegurar_perfil(user, path, base=None)``: onboarding bajo el lock con
+    re-read y re-deteccion (carrera ganada → perfil del ganador sin
+    reescribir); si no, merge por usuario de la forma 3x3 y escritura atomica.
   - ``relativizar``/``absolutizar`` (D5 two-track): relativizacion string-level
     ``[getenv PROJECT_ROOT]`` — la comparacion de prefijo se hace sobre una
     copia canonica case-folded (backslashes a slashes, strip, ``rstrip("/")``,
     ``.lower()`` total) y la emision trocea el ORIGINAL normalizado a slashes
-    con casing intacto. Nunca compara contra cadenas crudas (seguridad
-    Windows: ``l:\\vfx\\2026\\...`` ≡ ``L:/VFX/2026``). ``absolutizar``
-    sustituye la base inyectada VERBATIM (casing original, slashes forward).
-  - ``get_context``: ``{proyecto, plano, version, carpeta_salida, base, so}``
-    derivado SOLO de perfil+plato inyectados; ``base`` es la primera root del
-    perfil prefijada por la ruta del plato y ``so`` su plataforma; ``proyecto``
-    via ``proyecto_desde_ruta(plato, base)`` con fallback al primer token del
-    nombre; ``carpeta_salida`` siempre relativa a ``[getenv PROJECT_ROOT]``.
-  - ``variables_entorno``: contrato TCL como DATOS (``PROJECT_ROOT`` + 
-    PYTHON_TO_VFX/COMP/FROM_VFX derivados de ``reconstruir_rutas`` filtrado por
-    ``sufijo_so``). NUNCA muta ``os.environ``: la inyeccion la hace la futura
-    capa de carga (addOnScriptLoad), no el motor.
+    con casing intacto. ``absolutizar`` sustituye la base inyectada VERBATIM.
+  - ``get_context(perfil, ruta_plato)``: ``{proyecto, plano, version,
+    carpeta_salida, espacio, so, project_root}`` derivado SOLO de
+    perfil+plato inyectados; ``project_root`` por CORTE ESTRUCTURAL
+    (``raiz_proyecto_desde_ruta``); ``espacio``/``so`` de la root del espacio
+    que prefija el plato (``_espacio_prefijado``); ``proyecto`` = segmento de
+    proyecto de ese corte con fallback al token del nombre;
+    ``carpeta_salida`` SIEMPRE ``"[getenv PROJECT_ROOT]/COMP/"`` (AD3).
+  - ``variables_entorno(contexto, perfil=None)``: contrato TCL como DATOS —
+    ``PROJECT_ROOT`` por corte (NUNCA base); PYTHON_TO_VFX/COMP/FROM_VFX desde
+    las raices del perfil para el SO actual; espacio faltante → fallback
+    hermano ``reconstruir_rutas(dirname, basename)`` del corte (AD7, sin slash
+    final); clave irresoluble OMITIDA, nunca ``""``. NUNCA muta
+    ``os.environ``: la inyeccion la hace la capa de carga, no el motor.
 
-Este modulo queda autocontenido y 100% stdlib, sin ambiente (sin getpass,
-socket ni platform en la logica: todo parametro es inyectado).
-Ninguna ruta real del estudio: solo raices ficticias ``/Volumes/estudio/2026``,
-``L:/VFX/2026`` y ``/mnt/estudio/2026``.
+Lock (D6): exclusivo sobre un archivo HERMANO ``path + ".lock"`` — nunca el
+target: ``os.replace`` cambia el inode y un lock ahi quedaria huerfano tras la
+primera escritura. fcntl (POSIX) / msvcrt (Windows) / no-op documentado;
+3 intentos de <=2.0 s y ``TimeoutError`` al agotar (nunca overwrite silencioso);
+``_lock_clase`` es factory con plataforma inyectada para testear ambas ramas.
+
+Modulo autocontenido y 100% stdlib, sin ambiente (getpass/socket/platform en
+la logica: todo parametro es inyectado). Ninguna ruta real del estudio: solo
+raices ficticias.
 """
 
 import contextlib
@@ -64,12 +65,20 @@ import re
 import tempfile
 import time
 
-from .entorno import proyecto_desde_ruta, reconstruir_rutas, sufijo_so
+from .entorno import raiz_proyecto_desde_ruta, reconstruir_rutas, sufijo_so
 from .nombres import parsear_plato
 
-_ROOT_DEF_MACOS = "/Volumes/estudio/2026"
-_ROOT_DEF_WINDOWS = "L:/VFX/2026"
-_ROOT_DEF_LINUX = "/mnt/estudio/2026"
+# Espacios del esquema 3x3 (AD1) y razas de SO soportadas.
+_ESPACIOS = ("TO_VFX", "COMP", "FROM_VFX")
+_PLATAFORMAS_SOPORTADAS = ("macOS", "Windows", "Linux")
+
+# Raices ficticias por plataforma (nunca rutas reales del estudio).
+_RAICES_FICTICIAS = {
+    "macOS": "/Volumes/estudio/2026",
+    "Windows": "L:/VFX/2026",
+    "Linux": "/mnt/estudio/2026",
+}
+_PROYECTO_FICTICIO = "CINE"
 
 _INTENTOS_LOCK = 3
 _PLAZO_INTENTO_S = 2.0
@@ -104,7 +113,8 @@ def leer_perfiles(path):
 
     Un archivo inexistente devuelve un store vacio sin lanzar; JSON malformado
     lanza ``ValueError``. El envelope envuelve los perfiles en ``{"perfiles":
-    ...}`` (D1) y este devuelve SOLO el dict interno.
+    ...}`` (D1) y este devuelve SOLO el dict interno. Nunca crea ``.saman/``
+    (AD6: solo escrituras lockean y crean el directorio).
     """
     envelope = _leer_envelope(path)
     inner = envelope.get("perfiles")
@@ -145,15 +155,37 @@ def _escribir_atomico(path, contenido):
                 pass
 
 
-# --- Merge por usuario (kernel compartido, D3) ----------------------------------
+# --- Forma del perfil (AD1) -----------------------------------------------------
+
+
+def detectar_forma_perfil(perfil):
+    """Clasifica el perfil: ``"nuevo"`` (esquema 3x3) o ``"legacy"`` (AD1).
+
+    ``"nuevo"`` si el dict tiene al menos un espacio valido (TO_VFX/COMP/
+    FROM_VFX con valor dict). Cualquier otra cosa — un entry con
+    ``hosts``/``default`` y sin espacios, un dict vacio, no-dict o ``None`` —
+    es ``"legacy"``: la resolucion la tratara como desconocida y la escritura
+    la regenerara con la forma nueva (flag solo-lectura para la UI).
+    """
+    if isinstance(perfil, dict):
+        for espacio in _ESPACIOS:
+            if isinstance(perfil.get(espacio), dict):
+                return "nuevo"
+    return "legacy"
+
+
+# --- Merge por usuario (kernel compartido, D1/D3) --------------------------------
 
 
 def _mezclar_perfil_usuario(store, user, perfil):
-    """Merge de UN usuario en `store`: hosts por host, default reemplazado.
+    """Merge de UN usuario en `store`: por ESPACIO, legacy reemplazado.
 
-    Otros usuarios quedan intactos; dentro del usuario, los hosts ya conocidos
-    se conservan y solo se agregan/actualizan los entrantes. Devuelve `store`
-    (muta in-place: es el kernel de read-merge-write bajo lock).
+    Otros usuarios quedan intactos; dentro del usuario, los espacios ya
+    conocidos conservan sus raices y solo se agregan/actualizan las entrantes
+    (ADE1: espacios independientes). Si la entrada existente tiene forma
+    LEGACY (hosts/default, D1) se REEMPLAZA entera por la forma entrante.
+    Devuelve `store` (muta in-place: es el kernel de read-merge-write bajo
+    lock).
     """
     if not isinstance(perfil, dict):
         raise ValueError(f"Perfil de '{user}' debe ser un objeto JSON")
@@ -161,40 +193,31 @@ def _mezclar_perfil_usuario(store, user, perfil):
     if not isinstance(existing, dict):
         existing = {}
         store[user] = existing
-    hosts_entrantes = perfil.get("hosts")
-    if hosts_entrantes is not None:
-        if not isinstance(hosts_entrantes, dict):
-            raise ValueError(f"'hosts' del usuario '{user}' debe ser un objeto JSON")
-        hosts_dest = existing.get("hosts")
-        if not isinstance(hosts_dest, dict):
-            hosts_dest = {}
-            existing["hosts"] = hosts_dest
-        for host, roots in hosts_entrantes.items():
-            hosts_dest[host] = roots
-    if "default" in perfil:
-        existing["default"] = perfil["default"]
+    if detectar_forma_perfil(existing) == "legacy":
+        # Reemplazo total de la forma vieja por la nueva (AD1: silent regen).
+        store[user] = perfil
+        return store
+    for espacio, raices in perfil.items():
+        if not isinstance(raices, dict):
+            raise ValueError(f"El espacio '{espacio}' de '{user}' debe ser un objeto JSON")
+        dest = existing.get(espacio)
+        if not isinstance(dest, dict):
+            dest = {}
+            existing[espacio] = dest
+        for so, root in raices.items():
+            dest[so] = root
     return store
-
-
-def _merge_perfil(store, user, hostname, roots):
-    """Merge de un par user/hostname → roots en un store existente (D3).
-
-    Kernel que el onboarding de G6 usara bajo lock: escribe tanto
-    ``hosts[hostname]`` como ``default`` para que el fallback user-only
-    funcione en otras maquinas del mismo usuario.
-    """
-    return _mezclar_perfil_usuario(
-        store, user, {"hosts": {hostname: roots}, "default": roots}
-    )
 
 
 def guardar_perfiles(path, perfiles):
     """Persiste el store interno bajo lock y de forma atomica (spec).
 
-    Bajo el lock exclusivo hace READ-MERGE-WRITE: relee el store actual, mergea
-    `perfiles` por usuario (nunca replace a ciegas), conserva las claves
-    top-level desconocidas del envelope (futuro metadata) y reescribe con tmp +
-    ``os.replace``. Dos Nuke/renders paralelos no pierden perfiles ajenos.
+    Bajo el lock exclusivo hace READ-MERGE-WRITE: relee el store actual,
+    mergea `perfiles` por usuario y por espacio (nunca replace a ciegas),
+    conserva las claves top-level desconocidas del envelope (futuro metadata)
+    y reescribe con tmp + ``os.replace``. El directorio padre (``.saman/``) se
+    crea lazy bajo lock (``os.makedirs(dirname, exist_ok=True)``) — nunca en
+    lectura. Dos Nuke/renders paralelos no pierden perfiles ajenos.
     """
     if not isinstance(perfiles, dict):
         raise ValueError("perfiles debe ser un objeto JSON")
@@ -224,125 +247,97 @@ def _escribir_perfiles(path, perfiles):
 # --- Perfil default -------------------------------------------------------------
 
 
-def crear_perfil_default(base=None):
-    """Construye roots ficticias por plataforma (D1/D3).
-
-    Una base inyectada rellena el slot que coincide con su forma:
-    ``/Volumes/`` → macOS, ``^[A-Za-z]:`` → Windows, ``/mnt/`` → Linux. Si
-    ninguna forma coincide se conservan las tres roots ficticias.
-    """
-    roots = {
-        "macOS": _ROOT_DEF_MACOS,
-        "Windows": _ROOT_DEF_WINDOWS,
-        "Linux": _ROOT_DEF_LINUX,
-    }
-    if base is None:
-        return roots
-    base = str(base).strip()
+def _so_por_forma(base):
+    """SO cuyo slot rellena la base inyectada por su forma (AD1/D3)."""
     if base.startswith("/Volumes/"):
-        roots["macOS"] = base
-    elif re.match(r"^[A-Za-z]:", base):
-        roots["Windows"] = base
-    elif base.startswith("/mnt/"):
-        roots["Linux"] = base
-    return roots
-
-
-# --- G6: Resolucion por precedencia (D2) + onboarding bajo lock (D3) -----------
-
-
-def _emparejar_perfil(user, hostname, perfiles):
-    """Empareja user/hostname contra el store interno con la precedencia D2.
-
-    Orden canonico: (1) par exacto ``perfiles[user]["hosts"][hostname]`` -> ese
-    dict de roots; (2) user-only ``perfiles[user]["default"]`` -> ese dict; (3)
-    hostname-only: primer usuario en orden de documento (insercion JSON) cuyo
-    ``hosts[hostname]`` exista -> ese dict (estaciones compartidas: maquina
-    conocida, usuario no); (4) miss -> ``None``: el marcador de onboarding
-    (D2: nunca excepcion; la API publica lo absorbe y nunca lo expone).
-
-    Todo match devuelve el MISMO shape ``{"macOS","Windows","Linux"}`` (D2:
-    "full vs partial" es procedencia, no forma). Valores no-dict se ignoran
-    (D1: claves internas desconocidas no rompen el motor).
-    """
-    usuario = perfiles.get(user)
-    if isinstance(usuario, dict):
-        hosts = usuario.get("hosts")
-        if isinstance(hosts, dict):
-            roots = hosts.get(hostname)
-            if isinstance(roots, dict):
-                return roots
-        default = usuario.get("default")
-        if isinstance(default, dict):
-            return default
-    for perfil in perfiles.values():
-        if not isinstance(perfil, dict):
-            continue
-        hosts = perfil.get("hosts")
-        if not isinstance(hosts, dict):
-            continue
-        roots = hosts.get(hostname)
-        if isinstance(roots, dict):
-            return roots
+        return "macOS"
+    if re.match(r"^[A-Za-z]:", base):
+        return "Windows"
+    if base.startswith("/mnt/"):
+        return "Linux"
     return None
 
 
-def ruta_para_plataforma(perfil, so):
-    """Raiz del perfil para la plataforma ``so``; ``None`` si no esta (D2).
+def crear_perfil_default(base=None):
+    """Construye el perfil 3x3 ficticio por defecto (AD1/D3).
 
-    ``perfil`` es un dict de roots (shape ``{"macOS","Windows","Linux"}``). Si
-    la plataforma pedida no existe en el perfil se devuelve ``None``, sin
-    lanzar: la llamada indice via ``perfil.get(so)`` (D2).
+    Tres espacios x tres SO, todos con raices ficticias del proyecto ficticio
+    ``CINE``. Una base inyectada rellena SOLO el slot del SO que coincide con
+    su forma (``/Volumes/`` → macOS, ``^[A-Za-z]:`` → Windows, ``/mnt/`` →
+    Linux) en los TRES espacios: ``{base}/{ESPACIO}``. Si ninguna forma
+    coincide se conservan las tres raices ficticias.
+    """
+    perfil = {}
+    for espacio in _ESPACIOS:
+        perfil[espacio] = {}
+        for so, raiz in _RAICES_FICTICIAS.items():
+            perfil[espacio][so] = f"{raiz}/{_PROYECTO_FICTICIO}/{espacio}"
+    if base is None:
+        return perfil
+    base = str(base).strip().rstrip("/")
+    so_base = _so_por_forma(base)
+    if so_base:
+        for espacio in _ESPACIOS:
+            perfil[espacio][so_base] = f"{base}/{espacio}"
+    return perfil
+
+
+def ruta_para_espacio(perfil, espacio, so):
+    """Root del ``espacio`` para la plataforma ``so``; ``None`` si no (AD1).
+
+    ``perfil`` es un dict 3x3 (espacio → {OS → root}). Combinacion ausente →
+    ``None`` sin lanzar (``perfil.get(espacio, {}).get(so)``).
     """
     if not isinstance(perfil, dict):
         return None
-    return perfil.get(so)
+    raices = perfil.get(espacio)
+    if not isinstance(raices, dict):
+        return None
+    return raices.get(so)
 
 
-def asegurar_perfil(user, hostname, path, base=None):
-    """Onboarding: crea y persiste el perfil default bajo lock; sin raise (spec).
+# --- G6: resolucion por usuario (AD2) + onboarding bajo lock (D3) ---------------
 
-    D3: bajo ``_lock_perfiles`` RELEE el store y RE-RESUELVE. Si el par ya
-    existe entre nuestra lectura inicial y la adquisicion del lock (carrera
-    ganada por otro proceso) devuelve el perfil del ganador SIN escribir. Si
-    no, hace merge por usuario (``hosts[hostname]`` + ``default``, via
-    ``_merge_perfil`` — el fallback user-only funciona luego en otras maquinas)
-    y escribe atomico conservando las claves top-level del envelope. Una base
-    inyectada rellena el slot que coincide con su forma
+
+def resolver_perfil(user, path):
+    """Resuelve el perfil por USUARIO; desconocido/legacy -> onboarding (spec).
+
+    ``perfiles.get(user)`` directo, sin escalera ni hostname (AD2). Match con
+    forma nueva → ese dict 3x3 tal cual. Ausente o con forma legacy → re-
+    onboarding via ``asegurar_perfil`` bajo lock (la escritura regenera la
+    forma nueva, AD1). NUNCA lanza por desconocido y NUNCA devuelve ``None``.
+    """
+    perfil = leer_perfiles(path).get(user)
+    if detectar_forma_perfil(perfil) == "nuevo":
+        return perfil
+    return asegurar_perfil(user, path)
+
+
+def asegurar_perfil(user, path, base=None):
+    """Onboarding: crea y persiste el perfil 3x3 bajo lock; sin raise (spec).
+
+    D3: bajo ``_lock_perfiles`` RELEE el store y RE-DETECTA. Si entre nuestra
+    lectura inicial y la adquisicion del lock otro proceso ya persisitió un
+    perfil NUEVO para el usuario (carrera ganada) devuelve el del ganador SIN
+    escribir. Si no: mergea la forma 3x3 por usuario (AD1: una entrada legacy
+    se reemplaza) y escribe atomico conservando las claves top-level del
+    envelope. Una base inyectada rellena el slot que coincide con su forma
     (``crear_perfil_default(base)``). Sin interaccion de usuario; nunca raise.
     """
-    roots = crear_perfil_default(base)
+    perfil_nuevo = crear_perfil_default(base)
     with _lock_perfiles(path):
         store = leer_perfiles(path)
-        ganador = _emparejar_perfil(user, hostname, store)
-        if ganador is not None:
-            return ganador
-        _merge_perfil(store, user, hostname, roots)
+        existente = store.get(user)
+        if detectar_forma_perfil(existente) == "nuevo":
+            return existente
+        _mezclar_perfil_usuario(store, user, perfil_nuevo)
         _escribir_perfiles(path, store)
-    return roots
-
-
-def resolver_perfil(user, hostname, path):
-    """Resuelve las roots por precedencia D2; desconocido -> onboarding (spec).
-
-    Lee (sin lock; el replace atomico garantiza un inode completo) y empareja.
-    Match -> devuelve ese dict de roots tal cual. Miss (marcador ``None`` de
-    ``_emparejar_perfil``) -> ``asegurar_perfil`` bajo lock. NUNCA lanza por
-    desconocido y NUNCA devuelve ``None``: el marcador de onboarding es interno
-    al emparejador y la API publica lo absorbe (D2/D3).
-    """
-    match = _emparejar_perfil(user, hostname, leer_perfiles(path))
-    if match is not None:
-        return match
-    return asegurar_perfil(user, hostname, path)
+    return perfil_nuevo
 
 
 # --- G7: Relativizacion / contexto / entorno (D4/D5) --------------------------
 
 _TOK_PROJECT_ROOT = "[getenv PROJECT_ROOT]"
-
-# Plataformas soportadas para las que existe sufijo de knob (sufijo_so).
-_PLATAFORMAS_SOPORTADAS = ("macOS", "Windows", "Linux")
 
 
 def _normalizar_para_comparar(path):
@@ -397,35 +392,34 @@ def absolutizar(ruta, base):
     return ruta_s
 
 
-def _base_prefijada(perfil, ruta_plato):
-    """Primera root del perfil que es prefijo de la ruta del plato (D4).
+def _espacio_prefijado(perfil, ruta_plato):
+    """Primer espacio del perfil cuya root (en su SO) prefija el plato (D4).
 
-    Compara sobre la copia canonica (D5) y devuelve la root VERBATIM
-    (casing original, slashes forward, sin ``/`` final) junto con su
-    plataforma: ``(base, so)``. Sin match → ``(None, None)``. El guard de
-    prefijo parcial rechaza roots como ``/Volumes/estudio2026``.
+    Compara sobre la copia canonica (D5) en orden canonico de espacios
+    (TO_VFX, COMP, FROM_VFX) y plataformas (macOS, Windows, Linux) y devuelve
+    ``(espacio, so)`` de la PRIMERA root que prefija la ruta del plato. Sin
+    match → ``(None, None)``. El guard de prefijo parcial rechaza roots como
+    ``/Volumes/estudio2026`` (mismo criterio que ``_base_prefijada`` V1).
     """
     if not isinstance(perfil, dict):
         return None, None
     clave_ruta = _normalizar_para_comparar(ruta_plato)
-    for so, root in perfil.items():
-        if root is None:
+    for espacio in _ESPACIOS:
+        raices = perfil.get(espacio)
+        if not isinstance(raices, dict):
             continue
-        clave_root = _normalizar_para_comparar(root)
-        if clave_ruta.startswith(clave_root + "/"):
-            root_s = str(root).replace("\\", "/").strip().rstrip("/")
-            return root_s, so
+        for so in _PLATAFORMAS_SOPORTADAS:
+            root = raices.get(so)
+            if root is None:
+                continue
+            clave_root = _normalizar_para_comparar(root)
+            if clave_ruta.startswith(clave_root + "/"):
+                return espacio, so
     return None, None
 
 
 def _proyecto_desde_nombre(ruta_plato):
-    """Primer token del nombre del plato (fallback determinista, D4).
-
-    Cubre el plato SOLO con basename (sin ruta bajo la base): ni la ruta ni el
-    parseo canonical aportan proyecto, y la convencion
-    '{PROYECTO}_{EP}_{escena}_{shot}_V{nn}' hace que el prefijo del nombre sea
-    el proyecto. Nunca lanza.
-    """
+    """Primer token del nombre del plato (fallback determinista, D4)."""
     ruta_s = str(ruta_plato or "").replace("\\", "/")
     basename = ruta_s.rsplit("/", 1)[-1]
     tallo = basename.rsplit(".", 1)[0] if "." in basename else basename
@@ -434,24 +428,28 @@ def _proyecto_desde_nombre(ruta_plato):
 
 
 def get_context(perfil, ruta_plato):
-    """Contexto ``{proyecto, plano, version, carpeta_salida, base, so}`` (D4).
+    """Contexto ``{proyecto, plano, version, carpeta_salida, espacio, so,
+    project_root}`` (D4/AD3).
 
     Derivado SOLO de perfil y plato inyectados; inputs identicos → outputs
-    identicos. ``base`` es la primera root del perfil prefijada por la ruta del
-    plato y ``so`` su plataforma; ``proyecto`` se deriva con
-    ``proyecto_desde_ruta(plato, base)`` (base inyectada, determinista) y, si
-    no hay match, cae al primer token del nombre del plato. ``carpeta_salida``
-    es siempre relativa a '[getenv PROJECT_ROOT]'. Nombres/versiones
-    malformados nunca lanzan (parseo de nombres nunca raise).
+    identicos. ``project_root`` = CORTE ESTRUCTURAL del plato
+    (``raiz_proyecto_desde_ruta``); ``espacio``/``so`` salen de la root del
+    espacio que prefija el plato (``_espacio_prefijado``); ``proyecto`` es el
+    segmento de proyecto de ese corte con fallback al token del nombre del
+    plato. ``carpeta_salida`` es SIEMPRE '[getenv PROJECT_ROOT]/COMP/' (AD3).
+    Nombres/versiones malformados nunca lanzan (parseo nunca raise).
     """
-    base, so = _base_prefijada(perfil, ruta_plato)
+    espacio, so = _espacio_prefijado(perfil, ruta_plato)
+    project_root = raiz_proyecto_desde_ruta(ruta_plato)
     parsed = parsear_plato(ruta_plato)
     plano = parsed.get("plano") if parsed else None
     version = parsed.get("version") if parsed else None
 
     proyecto = None
-    if base:
-        proyecto = proyecto_desde_ruta(ruta_plato, base=base)
+    if project_root:
+        ultimo = project_root.rsplit("/", 1)[-1]
+        if ultimo:
+            proyecto = ultimo
     if proyecto is None and parsed and parsed.get("proyecto"):
         proyecto = parsed["proyecto"]
     if proyecto is None:
@@ -459,41 +457,65 @@ def get_context(perfil, ruta_plato):
 
     carpeta_salida = None
     if proyecto:
-        carpeta_salida = f"{_TOK_PROJECT_ROOT}/{proyecto}/COMP/"
+        carpeta_salida = f"{_TOK_PROJECT_ROOT}/COMP/"
     return {
         "proyecto": proyecto,
         "plano": plano,
         "version": version,
         "carpeta_salida": carpeta_salida,
-        "base": base,
+        "espacio": espacio,
         "so": so,
+        "project_root": project_root,
     }
 
 
-def variables_entorno(contexto):
-    """Contrato de entorno TCL como DATOS; nunca muta os.environ (D4/spec).
+def variables_entorno(contexto, perfil=None):
+    """Contrato de entorno TCL como DATOS; nunca muta os.environ (AD7/spec).
 
-    Devuelve ``{'PROJECT_ROOT': base resuelta}`` y, si hay base, plataforma
-    soportada y proyecto, ademas PYTHON_TO_VFX / PYTHON_COMP / PYTHON_FROM_VFX
-    derivados de ``reconstruir_rutas(base, proyecto)`` filtrado por
-    ``sufijo_so(so)`` (rutas ficticias con forward slashes). Puro data-driven:
-    la inyeccion real a ``os.environ`` (para el TCL ``[getenv PROJECT_ROOT]``
-    de Nuke via addOnScriptLoad) la hace la futura capa de carga.
+    ``PROJECT_ROOT`` = raiz de proyecto por corte estructural del contexto
+    (NUNCA base). PYTHON_TO_VFX / PYTHON_COMP / PYTHON_FROM_VFX = raices del
+    perfil para el SO del contexto; si el espacio falta, cae al fallback
+    HERMANO ``reconstruir_rutas(dirname, basename)`` de la propia raiz de
+    proyecto (contrato de knob V1 intacto) SIN slash final. Clave irresoluble
+    → OMITIDA, nunca ``""`` (AD7). ``os.environ`` nunca se toca: la inyeccion
+    real (para el TCL ``[getenv PROJECT_ROOT]`` de Nuke via addOnScriptLoad)
+    la hace la capa de carga.
     """
     if not isinstance(contexto, dict):
         return {}
-    base = contexto.get("base")
-    if not base:
-        return {}
+    env = {}
+    project_root = contexto.get("project_root")
+    if project_root:
+        env["PROJECT_ROOT"] = str(project_root).replace("\\", "/").strip().rstrip("/")
     so = contexto.get("so")
-    proyecto = contexto.get("proyecto")
-    env = {"PROJECT_ROOT": str(base)}
-    if so in _PLATAFORMAS_SOPORTADAS and proyecto:
-        suf = sufijo_so(so)
-        rutas = reconstruir_rutas(base, proyecto)
-        env["PYTHON_TO_VFX"] = rutas["TO_VFX_SERVER_" + suf]
-        env["PYTHON_COMP"] = rutas["comp_SERVER_" + suf]
-        env["PYTHON_FROM_VFX"] = rutas["FROM_VFX_SERVER_" + suf]
+    if so not in _PLATAFORMAS_SOPORTADAS:
+        return env
+    perfil = perfil if isinstance(perfil, dict) else None
+
+    # Fallback hermano (AD7): reconstruir_rutas(dirname, basename) del corte.
+    reconstruidas = None
+    if project_root:
+        raiz = str(project_root).replace("\\", "/").strip().rstrip("/")
+        if raiz and raiz != "/":
+            base, _, proy = raiz.rpartition("/")
+            if base and proy:
+                reconstruidas = reconstruir_rutas(base, proy)
+    claves_knob = {
+        "TO_VFX": "TO_VFX_SERVER_",
+        "COMP": "comp_SERVER_",
+        "FROM_VFX": "FROM_VFX_SERVER_",
+    }
+    suf = sufijo_so(so)
+    for espacio in _ESPACIOS:
+        root = None
+        if perfil is not None:
+            raices = perfil.get(espacio)
+            if isinstance(raices, dict):
+                root = raices.get(so)
+        if root is None and reconstruidas is not None:
+            root = reconstruidas.get(claves_knob[espacio] + suf)
+        if root:
+            env["PYTHON_" + espacio] = str(root).replace("\\", "/").strip().rstrip("/")
     return env
 
 
@@ -619,10 +641,14 @@ def _lock_perfiles(path, plataforma=None):
     Nunca bloquea el propio ``path``: ``os.replace`` cambia su inode y un lock
     sobre el target quedaria huerfano tras la primera escritura; el archivo
     hermano es estable entre reemplazos. Readers nunca lockean: el replace
-    atomico les garantiza ver un inode completo.
+    atomico les garantiza ver un inode completo. El directorio padre
+    (``.saman/``) se crea lazy AQUI — solo las escrituras adquieren lock, asi
+    que nunca se crea en lectura (AD6).
     """
     clase = _lock_clase(plataforma or os.name)
     ruta_lock = path + ".lock"
+    directorio = os.path.dirname(os.path.abspath(ruta_lock)) or "."
+    os.makedirs(directorio, exist_ok=True)
     with open(ruta_lock, "a+b") as fd:
         lock = clase(fd)
         _adquirir_lock(lock)

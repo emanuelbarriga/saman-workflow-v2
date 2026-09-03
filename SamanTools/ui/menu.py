@@ -108,16 +108,16 @@ def _identidad_ambiental():
 def _resolver_contexto_carga():
     """Resuelve (perfil, override, ruta_plato) del flujo de load, sin efectos.
 
-    Orden: identidad -> store -> perfil (``resolver_perfil``, con onboarding a
-    store ficticio si el par no existe) -> contexto del script
-    (``nuke.root().name()``) -> override manual (knob ``project_directory``,
-    ADR-5). Tolerante: cualquier fallo devuelve ``perfil=None`` y el flujo de
-    carga no escribe nada.
+    Orden: identidad -> store -> perfil (``resolver_perfil`` SOLO por usuario,
+    AD2/AD10 — sin hostname — con onboarding a store ficticio si el perfil no
+    existe) -> contexto del script (``nuke.root().name()``) -> override manual
+    (knob ``project_directory``, ADR-5). Tolerante: cualquier fallo devuelve
+    ``perfil=None`` y el flujo de carga no escribe nada.
     """
     try:
-        usuario, hostname = _identidad_ambiental()
+        usuario, _hostname = _identidad_ambiental()
         ruta_store = injector.obtener_ruta_store()
-        perfil = rutas_engine.resolver_perfil(usuario, hostname, ruta_store)
+        perfil = rutas_engine.resolver_perfil(usuario, ruta_store)
     except Exception:
         return None, None, ""
     ruta_plato = ""

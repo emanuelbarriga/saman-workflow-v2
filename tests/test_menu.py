@@ -271,8 +271,9 @@ def test_instalar_repetido_no_duplica_items(menu_mod, fake_nuke):
 def test_flujo_load_perfil_override_y_env_aplicados(menu_mod, fake_nuke, tmp_path, monkeypatch):
     """Load completo: perfil (onboarding a store ficticio) + override manual.
 
-    El override ``project_directory`` gana sobre la base del perfil, el env
-    resultante se cachea y se aplica a os.environ/__main__.
+    El override ``project_directory`` gana sobre el corte del plato y sobre
+    las raices del perfil (AD7): PROJECT_ROOT = override y las PYTHON_* se
+    derivan del hermano de esa raiz; el env se cachea y se aplica.
     """
     fake_nuke._root = _RootFake(RUTA_COMP, project_directory=OVERRIDE)
     _store_ficticio(tmp_path, monkeypatch)
@@ -281,24 +282,24 @@ def test_flujo_load_perfil_override_y_env_aplicados(menu_mod, fake_nuke, tmp_pat
     fake_nuke.callbacks["load"]()
 
     assert os.environ["PROJECT_ROOT"] == OVERRIDE
-    assert os.environ["PYTHON_TO_VFX"] == OVERRIDE + "/CINE/TO_VFX/"
-    assert os.environ["PYTHON_COMP"] == OVERRIDE + "/CINE/COMP/"
-    assert os.environ["PYTHON_FROM_VFX"] == OVERRIDE + "/CINE/FROM_VFX/"
+    assert os.environ["PYTHON_TO_VFX"] == OVERRIDE + "/TO_VFX"
+    assert os.environ["PYTHON_COMP"] == OVERRIDE + "/COMP"
+    assert os.environ["PYTHON_FROM_VFX"] == OVERRIDE + "/FROM_VFX"
     assert injector._env_inyectado is True
     assert injector._env_cache["PROJECT_ROOT"] == OVERRIDE
 
 
 def test_flujo_load_sin_override_usa_perfil(menu_mod, fake_nuke, tmp_path, monkeypatch):
-    """Sin override declarado, la base del perfil manda (camino distinto)."""
+    """Sin override declarado, el corte del plato y las raices del perfil mandan."""
     fake_nuke._root = _RootFake(RUTA_COMP)
     _store_ficticio(tmp_path, monkeypatch)
     monkeypatch.setattr(menu_mod, "_identidad_ambiental", lambda: ("artista_dev", "devhost"))
 
     fake_nuke.callbacks["load"]()
 
-    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026"
-    assert os.environ["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX/"
-    assert injector._env_cache["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
+    assert os.environ["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert injector._env_cache["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
 
 
 def test_flujo_load_env_preexistente_gana_no_op(menu_mod, fake_nuke, monkeypatch):
@@ -307,9 +308,9 @@ def test_flujo_load_env_preexistente_gana_no_op(menu_mod, fake_nuke, monkeypatch
     resoluciones = {"n": 0}
     original = rutas_engine.resolver_perfil
 
-    def espia(usuario, hostname, ruta):
+    def espia(usuario, ruta):
         resoluciones["n"] += 1
-        return original(usuario, hostname, ruta)
+        return original(usuario, ruta)
 
     monkeypatch.setattr(rutas_engine, "resolver_perfil", espia)
 
@@ -339,7 +340,7 @@ def test_save_rea_afirma_desde_memoria_sin_store(menu_mod, fake_nuke, tmp_path, 
     monkeypatch.setattr(menu_mod, "_identidad_ambiental", lambda: ("artista_dev", "devhost"))
 
     fake_nuke.callbacks["load"]()
-    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
 
     llamadas_store = {"n": 0}
     original_store = injector.obtener_ruta_store
@@ -353,7 +354,7 @@ def test_save_rea_afirma_desde_memoria_sin_store(menu_mod, fake_nuke, tmp_path, 
     os.environ.pop("PROJECT_ROOT", None)
     fake_nuke.callbacks["save"]()
 
-    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
     assert llamadas_store["n"] == 0
 
 

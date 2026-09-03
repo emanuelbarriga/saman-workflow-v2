@@ -1,31 +1,35 @@
 """
 SamanTools.ui.path_manager — helper PURO del panel Path Manager (Ctrl+Alt+R),
-cambio path-manager-panel, slice P1.
+contrato usuario-solo (cambio perfil-por-usuario, S1: migracion del slice P1).
 
 Divide el trabajo en capa pura / widget fino (precedente del injector):
 este modulo es 100% puro — NO importa nuke ni PySide, NO lee ni muta
-``os.environ`` y recibe identidad (``usuario``/``hostname``), SO y ruta del
-store como parametros inyectados. Devuelve DATOS; el widget (P2) renderiza
-y aplica el env via ``injector.cachear_env`` + ``aplicar_entorno``.
+``os.environ`` y recibe identidad (``usuario``), SO y ruta del store como
+parametros inyectados. Devuelve DATOS; el widget (P2) renderiza y aplica el
+env via ``injector.cachear_env`` + ``aplicar_entorno``. El hostname y la
+escalera de precedencia (par exacto → default → host ajeno) DESAPARECEN
+(AD2): un perfil pertenece al usuario, con raices independientes por espacio
+y por SO (3x3).
 
-  - ``estado_panel``: corte de LECTURA — perfil activo (roots por plataforma),
-    base del SO actual, estado de unidad y marcador de onboarding para
-    desconocidos. Nunca escribe.
-  - ``detectar_desconocido``: deteccion SOLO-LECTURA que replica la escalera
-    de precedencia D2 sobre el API publico ``leer_perfiles`` (par exacto →
-    user-only default → hostname ajeno → miss). NUNCA llama a
-    ``resolver_perfil`` (que haria onboarding) y NUNCA escribe (D2).
-  - ``_emparejar_con_fuente``: espejo del emparejador privado del motor que,
-    ademas, reporta el tipo de match alcanzado (``exact``/``default``/
-    ``foreign-host``) y el usuario dueno; el cambio de base D7 lo necesita.
-  - ``preparar_cambio_base``: corte de ESCRITURA (REQ-4, D7) — READ-MERGE-
-    WRITE bajo el lock de ``guardar_perfiles``: cambia SOLO la entrada matched
-    (exact/foreign-host → ``hosts[hostname]``; user-default → ``default`` +
-    ``hosts[hostname]``); otras raices del perfil y otros usuarios quedan
-    intactos. Devuelve ``{"perfil", "env", "unidad"}`` como datos.
-  - ``preparar_onboarding``: corte de ESCRITURA (REQ-5, D3) — persiste el par
-    via ``asegurar_perfil`` (lock-safe, slotting de la base inyectada) y
-    devuelve ``{"perfil", "env", "unidad"}`` como datos.
+  - ``estado_panel(ruta_store, usuario, so)``: corte de LECTURA — perfil
+    activo (3x3), raiz del SO actual (primera raiz no-None del perfil para el
+    SO, orden canonico de espacios), estado de unidad y marcador de
+    desconocido/legacy. Nunca escribe.
+  - ``detectar_desconocido(ruta_store, usuario)``: deteccion SOLO-LECTURA
+    sobre ``leer_perfiles``: el usuario tiene forma nueva → ``False``; si no
+    (ausente, legacy o store corrupto) → ``True``. NUNCA llama a
+    ``resolver_perfil`` (que haria onboarding) y NUNCA escribe (AD2).
+  - ``preparar_cambio_base(usuario, ruta_store, so, nueva_base,
+    ruta_plato="")``: corte de ESCRITURA (REQ-4, D7) — READ-MERGE-WRITE bajo
+    el lock de ``guardar_perfiles``: la nueva base (raiz de proyecto) rellena
+    el slot del SO en los TRES espacios (``{base}/{ESPACIO}``); otras raices
+    del perfil y otros usuarios quedan intactos. Devuelve
+    ``{"perfil", "env", "unidad"}`` como datos. Sin perfil nuevo → ValueError
+    claro (nunca onboarding silencioso).
+  - ``preparar_onboarding(usuario, ruta_store, base, so, ruta_plato="")``:
+    corte de ESCRITURA (REQ-5, D3) — persiste el perfil via ``asegurar_perfil``
+    (lock-safe, slotting de la base inyectada) y devuelve
+    ``{"perfil", "env", "unidad"}`` como datos.
 
 Determinismo: inputs identicos → salidas identicas (el unico dato vivo,
 ``entorno.estado_unidad``, respeta timeout + cache del motor). Ninguna ruta
@@ -37,46 +41,23 @@ from ..core import entorno
 from ..core import rutas_engine
 from . import injector
 
-# Tipos de match de la escalera D2 (espejo del motor con rastreo de origen).
-_FUENTE_EXACTA = "exact"
-_FUENTE_DEFAULT = "default"
-_FUENTE_HOST_AJENO = "foreign-host"
+# Orden canonico de los tres espacios (mismo del motor).
+_ESPACIOS = ("TO_VFX", "COMP", "FROM_VFX")
 
 
-# --- Emparejamiento solo-lectura (D2) ----------------------------------------
+def _raiz_para_so(perfil, so):
+    """Primera raiz NO-None del perfil para el ``so`` (orden canonico).
 
-
-def _emparejar_con_fuente(user, hostname, perfiles):
-    """Replica la escalera D2 y reporta el tipo de match alcanzado.
-
-    Orden canonico del motor (``rutas_engine._emparejar_perfil``): par exacto
-    ``perfiles[user]["hosts"][hostname]`` → ``("exact", user)``; user-only
-    ``perfiles[user]["default"]`` → ``("default", user)``; hostname-only:
-    primer usuario en orden de documento con ``hosts[hostname]`` →
-    ``("foreign-host", dueno)``; miss → ``(None, None, None)`` (marcador de
-    onboarding). NUNCA escribe ni resuelve: lectura pura para deteccion y
-    para decidir el shape de escritura D7.
+    Con un perfil 3x3 no hay una unica "base": la raiz del SO actual es la
+    del primer espacio que la tenga (nunca lanza; ``None`` si el SO no esta).
     """
-    usuario = perfiles.get(user)
-    if isinstance(usuario, dict):
-        hosts = usuario.get("hosts")
-        if isinstance(hosts, dict):
-            roots = hosts.get(hostname)
-            if isinstance(roots, dict):
-                return roots, _FUENTE_EXACTA, user
-        default = usuario.get("default")
-        if isinstance(default, dict):
-            return default, _FUENTE_DEFAULT, user
-    for dueno, perfil in perfiles.items():
-        if not isinstance(perfil, dict):
-            continue
-        hosts = perfil.get("hosts")
-        if not isinstance(hosts, dict):
-            continue
-        roots = hosts.get(hostname)
-        if isinstance(roots, dict):
-            return roots, _FUENTE_HOST_AJENO, dueno
-    return None, None, None
+    if not isinstance(perfil, dict):
+        return None
+    for espacio in _ESPACIOS:
+        root = rutas_engine.ruta_para_espacio(perfil, espacio, so)
+        if root:
+            return root
+    return None
 
 
 def _primera_candidata(so):
@@ -100,91 +81,87 @@ def _normalizar_base(base):
 # --- Corte de lectura --------------------------------------------------------
 
 
-def estado_panel(ruta_store, usuario, hostname, so):
+def estado_panel(ruta_store, usuario, so):
     """Estado de lectura del panel (REQ-1/REQ-2/REQ-3). Puro; sin escrituras.
 
     Devuelve ``{"conocido", "perfil", "base_actual", "unidad"}``:
 
-    * ``conocido`` — ``True`` si el par resuelve a perfil (escalera D2, sin
-      escribir); ``False`` si es desconocido (marcador de onboarding).
-    * ``perfil`` — dict de roots por plataforma del match, o ``None``.
-    * ``base_actual`` — root del perfil para el ``so`` inyectado, o ``None``.
+    * ``conocido`` — ``True`` si el usuario tiene un perfil con forma NUEVA
+      (3x3); ``False`` si es desconocido o legacy (marcador de onboarding,
+      AD2). Nunca escribe.
+    * ``perfil`` — dict 3x3 del usuario, o ``None``.
+    * ``base_actual`` — primera raiz del perfil para el ``so`` inyectado, o
+      ``None``.
     * ``unidad`` — ``entorno.estado_unidad(base_actual)`` (perfil conocido) o
       de la primera candidata de ``entorno.rutas_base(so)`` (sin perfil);
       timeout + cache respetados, nunca se cuelga en un mount muerto.
     """
     perfiles = rutas_engine.leer_perfiles(ruta_store)
-    roots, _fuente, _dueno = _emparejar_con_fuente(usuario, hostname, perfiles)
-    if roots is None:
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
         return {
             "conocido": False,
             "perfil": None,
             "base_actual": None,
             "unidad": entorno.estado_unidad(_primera_candidata(so)),
         }
-    base_actual = rutas_engine.ruta_para_plataforma(roots, so)
+    base_actual = _raiz_para_so(perfil, so)
     return {
         "conocido": True,
-        "perfil": roots,
+        "perfil": perfil,
         "base_actual": base_actual,
         "unidad": entorno.estado_unidad(base_actual),
     }
 
 
-def detectar_desconocido(ruta_store, usuario, hostname):
-    """``True`` si el par no resuelve a perfil alguno; ``False`` si resuelve.
+def detectar_desconocido(ruta_store, usuario):
+    """``True`` si el usuario no tiene perfil con forma nueva; ``False`` si lo tiene.
 
-    Lectura pura (D2): replica la escalera sobre ``leer_perfiles``, NUNCA
-    escribe y NUNCA llama a ``resolver_perfil`` (que haria onboarding
-    automatico). Store ausente o corrupto → ``True`` (no confirmable). Sin
-    raise: la deteccion alimenta la UI, nunca debe romperla.
+    Lectura pura (AD2): replica sobre ``leer_perfiles``; una entrada legacy
+    cuenta como desconocida (la escritura la regenerara). NUNCA escribe y
+    NUNCA llama a ``resolver_perfil`` (que haria onboarding automatico).
+    Store ausente o corrupto → ``True`` (no confirmable). Sin raise.
     """
     try:
         perfiles = rutas_engine.leer_perfiles(ruta_store)
     except ValueError:
         return True
-    roots, _fuente, _dueno = _emparejar_con_fuente(usuario, hostname, perfiles)
-    return roots is None
+    return rutas_engine.detectar_forma_perfil(perfiles.get(usuario)) != "nuevo"
 
 
 # --- Corte de escritura: cambio de base (REQ-4, D7) ---------------------------
 
 
-def preparar_cambio_base(usuario, hostname, ruta_store, so, nueva_base, ruta_plato=""):
-    """Persiste la nueva base del perfil matched y devuelve DATA (REQ-4, D7).
+def preparar_cambio_base(usuario, ruta_store, so, nueva_base, ruta_plato=""):
+    """Persiste la nueva base del slot SO del perfil y devuelve DATA (REQ-4, D7).
 
-    READ-MERGE-WRITE bajo el lock de ``guardar_perfiles``: cambia SOLO la
-    entrada matched — exact/foreign-host → ``hosts[hostname]`` del dueno;
-    user-default → ``default`` + ``hosts[hostname]`` — y conserva las otras
-    raices del perfil y los demas usuarios. Devuelve ``{"perfil", "env",
-    "unidad"}``: el perfil actualizado, el env delta de
-    ``injector.armar_estado_env`` (con la base nueva forzada) y el estado de
-    unidad de la base nueva. NO toca ``os.environ``: la propagacion la hace
-    el widget (P2). Sin match → ``ValueError`` claro (nunca onboarding
-    silencioso como ``resolver_perfil``).
+    READ-MERGE-WRITE bajo el lock de ``guardar_perfiles``: la ``nueva_base``
+    es una raiz de proyecto; rellena el slot del SO en los TRES espacios
+    (``{base}/{ESPACIO}``) y conserva las otras raices del perfil y los demas
+    usuarios. Devuelve ``{"perfil", "env", "unidad"}``: el perfil actualizado,
+    el env delta de ``injector.armar_estado_env`` (con la base nueva forzada)
+    y el estado de unidad de la base nueva. NO toca ``os.environ``: la
+    propagacion la hace el widget (P2). Sin perfil nuevo → ``ValueError``
+    claro (nunca onboarding silencioso como ``resolver_perfil``).
     """
     base_norm = _normalizar_base(nueva_base)
     perfiles = rutas_engine.leer_perfiles(ruta_store)
-    roots, fuente, dueno = _emparejar_con_fuente(usuario, hostname, perfiles)
-    if roots is None or fuente is None:
+    perfil = perfiles.get(usuario)
+    if rutas_engine.detectar_forma_perfil(perfil) != "nuevo":
         raise ValueError(
-            f"No hay perfil activo para '{usuario}' en '{hostname}': "
-            "complete el onboarding primero"
+            f"No hay perfil activo para '{usuario}': complete el onboarding primero"
         )
-    nuevas_roots = dict(roots)
-    nuevas_roots[so] = base_norm
-    if fuente == _FUENTE_DEFAULT:
-        rutas_engine.guardar_perfiles(
-            ruta_store,
-            {usuario: {"hosts": {hostname: nuevas_roots}, "default": nuevas_roots}},
-        )
-    else:
-        rutas_engine.guardar_perfiles(
-            ruta_store, {dueno: {"hosts": {hostname: nuevas_roots}}}
-        )
-    env = injector.armar_estado_env(nuevas_roots, so, ruta_plato, base=base_norm)
+    perfil_nuevo = rutas_engine.crear_perfil_default(base=base_norm)
+    # Solo el slot del SO entrante: conserva los demas SO y espacios ajenos.
+    actualizado = {}
+    for espacio in _ESPACIOS:
+        raices = dict(perfil.get(espacio) or {})
+        raices[so] = perfil_nuevo[espacio][so]
+        actualizado[espacio] = raices
+    rutas_engine.guardar_perfiles(ruta_store, {usuario: actualizado})
+    env = injector.armar_estado_env(actualizado, so, ruta_plato, base=base_norm)
     return {
-        "perfil": nuevas_roots,
+        "perfil": actualizado,
         "env": env,
         "unidad": entorno.estado_unidad(base_norm),
     }
@@ -193,23 +170,23 @@ def preparar_cambio_base(usuario, hostname, ruta_store, so, nueva_base, ruta_pla
 # --- Corte de escritura: onboarding (REQ-5, D3) -------------------------------
 
 
-def preparar_onboarding(usuario, hostname, ruta_store, base, so, ruta_plato=""):
-    """Persiste el onboarding del par y devuelve DATA (REQ-5, D3).
+def preparar_onboarding(usuario, ruta_store, base, so, ruta_plato=""):
+    """Persiste el onboarding del usuario y devuelve DATA (REQ-5, D3).
 
-    Via ``asegurar_perfil`` (lock-safe): construye las 3 roots ficticias por
-    plataforma con slotting de la base inyectada
+    Via ``asegurar_perfil`` (lock-safe): construye el perfil 3x3 con raices
+    ficticias por espacio y plataforma y slotting de la base inyectada
     (``crear_perfil_default``: ``/Volumes/`` → macOS, ``^[A-Za-z]:`` →
     Windows, ``/mnt/`` → Linux); si otro proceso gano la carrera devuelve el
     perfil del ganador sin reescribir. Devuelve ``{"perfil", "env",
-    "unidad"}``: las roots persistidas, el env delta de
-    ``injector.armar_estado_env`` (con la raiz del SO actual como base) y el
-    estado de unidad de esa raiz. NO toca ``os.environ``.
+    "unidad"}``: el perfil persistido, el env delta de
+    ``injector.armar_estado_env`` (con la base como PROJECT_ROOT) y el estado
+    de unidad de esa base. NO toca ``os.environ``.
     """
-    roots = rutas_engine.asegurar_perfil(usuario, hostname, ruta_store, base=base)
-    base_so = roots.get(so)
-    env = injector.armar_estado_env(roots, so, ruta_plato, base=base_so)
+    base_norm = _normalizar_base(base)
+    perfil = rutas_engine.asegurar_perfil(usuario, ruta_store, base=base_norm)
+    env = injector.armar_estado_env(perfil, so, ruta_plato, base=base_norm)
     return {
-        "perfil": roots,
+        "perfil": perfil,
         "env": env,
-        "unidad": entorno.estado_unidad(base_so),
+        "unidad": entorno.estado_unidad(base_norm),
     }

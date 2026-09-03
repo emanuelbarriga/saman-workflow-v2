@@ -1,17 +1,19 @@
 """
-Tests de SamanTools.ui.injector — slice H1 del cambio load-contract.
+Tests de SamanTools.ui.injector — slice H1 del cambio load-contract
+(contrato de env actualizado al esquema 3x3 de perfil-por-usuario, S1).
 
 El injector es la capa de carga que ensambla el entorno como DATOS puros
 (``armar_estado_env``) y lo aplica a ``os.environ`` + ``__main__`` en una
 capa fina separada (``aplicar_entorno``). Las funciones puras de H1 NO
 importan nuke: se testean con pytest directo, sin stub, igual que el nucleo.
 
-Este archivo cubre: ensamblado puro (incl. el gap #2286: base=None del
-engine para scripts untitled o fuera de toda root), cadena de resolucion de
-store, aplicacion idempotente, helper de override ``project_directory`` y la
-maquinaria de precedencia + cache en memoria (sub-parte pura de
-``registrar_callbacks``, que llega en H4 al estar ligada a nuke.ui).
-Todas las rutas son ficticias (/Volumes/estudio/2026) o de dev.
+Este archivo cubre: ensamblado puro con el nuevo contrato (PROJECT_ROOT por
+corte estructural del plato; PYTHON_* = raices del perfil 3x3 para el SO, o
+derivadas de la base inyectada via el hermano reconstruir_rutas, AD7), cadena
+de resolucion de store, aplicacion idempotente, helper de override
+``project_directory`` y la maquinaria de precedencia + cache en memoria
+(sub-parte pura de ``registrar_callbacks``, que llega en H4 al estar ligada a
+nuke.ui). Todas las rutas son ficticias (/Volumes/estudio/2026) o de dev.
 """
 
 import json
@@ -31,9 +33,21 @@ from SamanTools.ui import injector
 # --- Fixtures y fakes ----------------------------------------------------------
 
 PERFIL_TRIPLE = {
-    "macOS": "/Volumes/estudio/2026",
-    "Windows": "L:/VFX/2026",
-    "Linux": "/mnt/estudio/2026",
+    "TO_VFX": {
+        "macOS": "/Volumes/estudio/2026/CINE/TO_VFX",
+        "Windows": "L:/VFX/2026/CINE/TO_VFX",
+        "Linux": "/mnt/estudio/2026/CINE/TO_VFX",
+    },
+    "COMP": {
+        "macOS": "/Volumes/estudio/2026/CINE/COMP",
+        "Windows": "L:/VFX/2026/CINE/COMP",
+        "Linux": "/mnt/estudio/2026/CINE/COMP",
+    },
+    "FROM_VFX": {
+        "macOS": "/Volumes/estudio/2026/CINE/FROM_VFX",
+        "Windows": "L:/VFX/2026/CINE/FROM_VFX",
+        "Linux": "/mnt/estudio/2026/CINE/FROM_VFX",
+    },
 }
 
 RUTA_COMP = "/Volumes/estudio/2026/CINE/TO_VFX/ep.nk"
@@ -122,37 +136,39 @@ def sin_config_local_real():
     sys.modules.pop("SamanTools.config_local", None)
 
 
-# --- H1.1: armar_estado_env (pura) --------------------------------------------
+# --- H1.1: armar_estado_env (pura, contrato 3x3) -------------------------------
 
 
 def test_env_completo_bajo_root():
+    """Corte estructural del plato -> PROJECT_ROOT; PYTHON_* del perfil 3x3."""
     env = injector.armar_estado_env(PERFIL_TRIPLE, "macOS", RUTA_COMP)
-    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
-    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX/"
-    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP/"
-    assert env["PYTHON_FROM_VFX"] == "/Volumes/estudio/2026/CINE/FROM_VFX/"
+    assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
+    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/CINE/COMP"
+    assert env["PYTHON_FROM_VFX"] == "/Volumes/estudio/2026/CINE/FROM_VFX"
 
 
 def test_untitled_gap_2286_inyecta_base():
-    # Precondicion: el engine devuelve base=None para un script sin ruta.
+    """Precondicion: el engine no corta un script sin ruta (project_root None)."""
     contexto_crudo = rutas_engine.get_context(PERFIL_TRIPLE, "")
-    assert contexto_crudo["base"] is None
+    assert contexto_crudo["project_root"] is None
     env = injector.armar_estado_env(
         PERFIL_TRIPLE, "macOS", "", base="/Volumes/estudio/2026"
     )
     assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
-    # Sin proyecto detectable, el contrato se limita a PROJECT_ROOT.
-    assert "PYTHON_COMP" not in env
+    # Con base inyectada las PYTHON_* se derivan del hermano de esa base (AD7).
+    assert env["PYTHON_COMP"] == "/Volumes/estudio/2026/COMP"
 
 
 def test_ruta_fuera_de_toda_root_inyecta_base():
-    # Camino distinto del gap: la ruta existe pero no cae bajo ninguna root.
+    """Camino distinto del gap: la ruta existe pero no cae bajo ninguna root."""
     contexto_crudo = rutas_engine.get_context(PERFIL_TRIPLE, "/tmp/fuera.nk")
-    assert contexto_crudo["base"] is None
+    assert contexto_crudo["project_root"] is None
     env = injector.armar_estado_env(
         PERFIL_TRIPLE, "macOS", "/tmp/fuera.nk", base="/Volumes/estudio/2026"
     )
     assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert env["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/TO_VFX"
 
 
 def test_determinista_entre_llamadas():
@@ -177,14 +193,14 @@ def test_base_por_plataforma_windows():
     env = injector.armar_estado_env(
         PERFIL_TRIPLE, "Windows", "L:/VFX/2026/CINE/TO_VFX/ep.nk"
     )
-    assert env["PROJECT_ROOT"] == "L:/VFX/2026"
-    assert env["PYTHON_TO_VFX"] == "L:/VFX/2026/CINE/TO_VFX/"
-    assert env["PYTHON_FROM_VFX"] == "L:/VFX/2026/CINE/FROM_VFX/"
+    assert env["PROJECT_ROOT"] == "L:/VFX/2026/CINE"
+    assert env["PYTHON_TO_VFX"] == "L:/VFX/2026/CINE/TO_VFX"
+    assert env["PYTHON_FROM_VFX"] == "L:/VFX/2026/CINE/FROM_VFX"
 
 
 def test_sin_base_posible_devuelve_env_vacio():
     # Perfil sin la plataforma pedida, sin base inyectada y ruta sin match.
-    perfil_parcial = {"Windows": "L:/VFX/2026"}
+    perfil_parcial = {"COMP": {"Windows": "L:/VFX/2026/CINE/COMP"}}
     assert injector.armar_estado_env(perfil_parcial, "macOS", "") == {}
 
 
@@ -333,8 +349,8 @@ def test_precedencia_override_gana():
         env, "/Volumes/estudio/2026/OTRO_COMP", {}
     )
     assert final["PROJECT_ROOT"] == "/Volumes/estudio/2026/OTRO_COMP"
-    # Las variables PYTHON_* derivadas de la base override se conservan.
-    assert final["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/OTRO_COMP/CINE/TO_VFX/"
+    # Las PYTHON_* derivadas de la base override (hermano de la raiz) se conservan.
+    assert final["PYTHON_TO_VFX"] == "/Volumes/estudio/2026/OTRO_COMP/TO_VFX"
     # El guard de precedencia es puro: no escribe nada en os.environ.
     assert dict(os.environ) == env_antes
 
@@ -343,7 +359,7 @@ def test_precedencia_perfil_default():
     env = injector.armar_estado_env(PERFIL_TRIPLE, "macOS", RUTA_COMP)
     final = injector._aplicar_precedencia(env, None, {})
     assert final == env
-    assert final["PROJECT_ROOT"] == "/Volumes/estudio/2026"
+    assert final["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
 
 
 def test_cachear_env_guarda_y_marca_inyectado():

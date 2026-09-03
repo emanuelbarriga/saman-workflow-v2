@@ -4,8 +4,8 @@ cambio path-manager-panel, slice P2.
 
 Widget THIN sobre el helper puro (D4, precedente ``cambiar_colorspace`` de V1):
 recibe el estado ya calculado por ``path_manager.estado_panel`` y la identidad
-(usuario/hostname/store/SO); NO computa perfiles, NO escribe el store y NO
-muta variables de entorno por su cuenta. La persistencia viaja por
+(``usuario``/store/SO — SIN hostname, AD2); NO computa perfiles, NO escribe el
+store y NO muta variables de entorno por su cuenta. La persistencia viaja por
 ``preparar_onboarding``/``preparar_cambio_base`` y la propagacion del entorno
 SOLO por ``injector.cachear_env`` + ``injector.aplicar_entorno``. El feedback
 al artista usa ``nuke.message`` (aceptado en la capa ui, D4).
@@ -49,18 +49,18 @@ if QtWidgets is not None:
         """Dialogo fino: renderiza datos del helper y delega submit + entorno.
 
         Recibe ``estado`` (salida de ``path_manager.estado_panel``) y la
-        identidad del par. Modo onboarding (par desconocido): formulario de
-        base y submit que persiste via ``preparar_onboarding``. Modo conocido:
-        formulario de cambio de base via ``preparar_cambio_base``. Ambos
-        submit propagan el env devuelto con ``cachear_env`` + ``aplicar_entorno``
-        y cierran el dialogo informando con ``nuke.message``.
+        identidad del usuario. Modo onboarding (perfil desconocido/legacy):
+        formulario de base y submit que persiste via ``preparar_onboarding``.
+        Modo conocido: formulario de cambio de base via
+        ``preparar_cambio_base``. Ambos submit propagan el env devuelto con
+        ``cachear_env`` + ``aplicar_entorno`` y cierran el dialogo informando
+        con ``nuke.message``.
         """
 
-        def __init__(self, estado, usuario, hostname, ruta_store, so, parent=None):
+        def __init__(self, estado, usuario, ruta_store, so, parent=None):
             super(PathManagerDialog, self).__init__(parent)
             self.estado = estado
             self.usuario = usuario
-            self.hostname = hostname
             self.ruta_store = ruta_store
             self.so = so
             self.setWindowTitle("Path Manager")
@@ -122,7 +122,7 @@ if QtWidgets is not None:
             if env:
                 injector.cachear_env(env)
                 injector.aplicar_entorno(env)
-            base = resultado.get("perfil", {}).get(self.so) or ""
+            base = env.get("PROJECT_ROOT") or ""
             self._informar(
                 "Path Manager: perfil '%s' activo con base '%s'." % (self.usuario, base)
             )
@@ -136,7 +136,7 @@ if QtWidgets is not None:
                 return
             try:
                 resultado = path_manager.preparar_onboarding(
-                    self.usuario, self.hostname, self.ruta_store, base, self.so
+                    self.usuario, self.ruta_store, base, self.so
                 )
             except ValueError as error:
                 self._informar("Path Manager: %s" % error)
@@ -151,7 +151,7 @@ if QtWidgets is not None:
                 return
             try:
                 resultado = path_manager.preparar_cambio_base(
-                    self.usuario, self.hostname, self.ruta_store, self.so, nueva
+                    self.usuario, self.ruta_store, self.so, nueva
                 )
             except ValueError as error:
                 self._informar("Path Manager: %s" % error)
@@ -160,29 +160,22 @@ if QtWidgets is not None:
 
 
 def _identidad_ambiental():
-    """Devuelve ``(usuario, hostname)`` del sistema; tolerante a fallos.
+    """Devuelve el ``usuario`` del sistema; tolerante a fallos.
 
-    Capa ui: ``getpass``/``socket`` estan permitidos aqui (mismo patron que
-    ``ui/menu.py``). Nunca lanza.
+    Capa ui: ``getpass`` esta permitido aqui (mismo patron que
+    ``ui/menu.py``); el hostname ya no participa (AD2). Nunca lanza.
     """
     usuario = "artista"
-    hostname = "localhost"
     try:
         import getpass
 
         usuario = getpass.getuser()
     except Exception:
         pass
-    try:
-        import socket
-
-        hostname = socket.gethostname()
-    except Exception:
-        pass
-    return usuario, hostname
+    return usuario
 
 
-def abrir_dialogo(nuke_mod=None, usuario=None, hostname=None, ruta_store=None, so=None, parent=None):
+def abrir_dialogo(nuke_mod=None, usuario=None, ruta_store=None, so=None, parent=None):
     """Abre el Path Manager de forma modal; degrade silencioso (REQ-5, D4).
 
     Guardas en orden: sin sesion grafica (``nuke.GUI`` falso o nuke ausente) ->
@@ -197,16 +190,16 @@ def abrir_dialogo(nuke_mod=None, usuario=None, hostname=None, ruta_store=None, s
         return None
     if QtWidgets is None:
         return None
-    if usuario is None or hostname is None:
-        usuario, hostname = _identidad_ambiental()
+    if usuario is None:
+        usuario = _identidad_ambiental()
     if ruta_store is None:
         ruta_store = injector.obtener_ruta_store()
     if so is None:
         so = entorno.detectar_so()
     try:
-        estado = path_manager.estado_panel(ruta_store, usuario, hostname, so)
+        estado = path_manager.estado_panel(ruta_store, usuario, so)
     except Exception:
         return None
-    dialogo = PathManagerDialog(estado, usuario, hostname, ruta_store, so, parent=parent)
+    dialogo = PathManagerDialog(estado, usuario, ruta_store, so, parent=parent)
     dialogo.exec()
     return dialogo

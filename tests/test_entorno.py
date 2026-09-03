@@ -267,3 +267,71 @@ def test_proyecto_desde_ruta_con_base_con_slash_final():
     assert (
         entorno.proyecto_desde_ruta(ruta, base="/Volumes/estudio/2026/") == "CINE"
     )
+
+
+# --------------------------------------------------------------------------
+# raiz_proyecto_desde_ruta (corte estructural por marcador, AD4)
+# --------------------------------------------------------------------------
+
+
+def test_raiz_proyecto_corte_en_comp():
+    """Spec: cut at COMP — la raiz es la porcion previa al primer marcador."""
+    ruta = "/Volumes/estudio/2026/CINE/COMP/EP_100/foo.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) == "/Volumes/estudio/2026/CINE"
+
+
+def test_raiz_proyecto_corte_en_from_vfx_otra_base():
+    """Spec: cut at FROM_VFX — camion distinto (Linux/2027) triangula la rama."""
+    ruta = "/mnt/estudio/2027/CINE/FROM_VFX/ep_050.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) == "/mnt/estudio/2027/CINE"
+
+
+def test_raiz_proyecto_sin_marcador_devuelve_none():
+    """Spec: no marker segment -> None."""
+    ruta = "/Volumes/estudio/2026/CINE/artwork/x.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) is None
+
+
+def test_raiz_proyecto_windows_normaliza_slashes():
+    """Spec: Windows backslashes -> forward slashes, corte en TO_VFX."""
+    ruta = r"L:\VFX\2026\CINE\TO_VFX\ep.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) == "L:/VFX/2026/CINE"
+
+
+def test_raiz_proyecto_base_sola_devuelve_none():
+    """La base en si no tiene segmento marcador: sin corte -> None."""
+    assert entorno.raiz_proyecto_desde_ruta("/Volumes/estudio/2026") is None
+
+
+def test_raiz_proyecto_saman_no_es_marcador():
+    """'.saman' NO es marcador (AD4): una ruta dentro de .saman no corta."""
+    ruta = "/Volumes/estudio/2026/CINE/.saman/nuke_profiles.json"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) is None
+
+
+def test_raiz_proyecto_marcador_case_insensitive():
+    """Marker match es case-insensitive: 'comp' == 'COMP'."""
+    ruta = "/Volumes/estudio/2026/CINE/comp/EP_100/foo.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) == "/Volumes/estudio/2026/CINE"
+
+
+def test_raiz_proyecto_marcador_debe_ser_segmento_entero():
+    """Boundary de segmento: 'COMPlex' NO es el marcador 'COMP'."""
+    ruta = "/Volumes/estudio/2026/CINE/COMPlex/x.nk"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) is None
+
+
+def test_raiz_proyecto_vacia_devuelve_none():
+    assert entorno.raiz_proyecto_desde_ruta("") is None
+    assert entorno.raiz_proyecto_desde_ruta(None) is None
+
+
+def test_raiz_proyecto_trailing_separadores_se_limpian():
+    """Separadores finales se limpian antes del corte (resultado sin / final)."""
+    ruta = "/Volumes/estudio/2026/CINE/COMP//"
+    assert entorno.raiz_proyecto_desde_ruta(ruta) == "/Volumes/estudio/2026/CINE"
+
+
+def test_raiz_proyecto_marcador_en_primera_posicion_devuelve_none():
+    """El marcador como PRIMER segmento no deja raiz previa: None."""
+    assert entorno.raiz_proyecto_desde_ruta("/COMP/ep.nk") is None

@@ -6,11 +6,11 @@ Divide el trabajo en PURE / THIN:
 
   - ``armar_estado_env`` es PURA: ensambla el entorno TCL como datos
     (``PROJECT_ROOT`` + ``PYTHON_TO_VFX``/``PYTHON_COMP``/``PYTHON_FROM_VFX``)
-    a partir de perfil, SO explicito, ruta del plato y una base inyectable.
-    NO importa nuke, NO muta ``os.environ`` ni ``__main__``: corrige el gap
-    del motor (issue #2286) donde un script untitled o fuera de toda root
-    produce ``base=None``, usando la base del parametro o de
-    ``ruta_para_plataforma``.
+    a partir de un perfil 3x3 (espacio → {OS → root}), SO explicito, ruta del
+    plato y una base inyectable. NO importa nuke, NO muta ``os.environ`` ni
+    ``__main__``: corrige el gap del motor (issue #2286) donde un script
+    untitled o fuera de toda root no produce corte estructural, usando la
+    base del parametro como ``PROJECT_ROOT``.
   - ``obtener_ruta_store`` resuelve la ruta del store de perfiles en cadena:
     ``NUKE_PROFILES_PATH`` (env) -> ``SamanTools.config_local`` (modulo scoped
     gitignored, atributo o JSON hermano) -> ``~/.config/saman/nuke_profiles.json``.
@@ -64,26 +64,27 @@ _RUTA_STORE_HOME = os.path.join(".config", "saman", "nuke_profiles.json")
 
 
 def armar_estado_env(perfil, so, ruta_plato, base=None):
-    """Ensambla el entorno TCL como dict PURO (spec load-injector).
+    """Ensambla el entorno TCL como dict PURO (spec load-injector, perfil-por-usuario).
 
-    La base operativa es la del parametro ``base`` o, si viene ``None``, la
-    raiz de ``ruta_para_plataforma(perfil, so)``. El contexto del motor
-    (``get_context``) puede devolver ``base=None`` para scripts untitled o
-    rutas fuera de toda root (gap #2286): en ese caso (o si la base
-    operativa difiere) se fuerza la base resuelta y el SO explicito en el
-    contexto antes de derivar las variables. No muta ``os.environ`` ni
-    ``__main__``; idem inputs -> idem outputs.
+    ``perfil`` es 3x3 (espacio → {OS → root}). La raiz de proyecto es el
+    CORTE ESTRUCTURAL del plato (``raiz_proyecto_desde_ruta``); si se inyecta
+    ``base`` (override manual del knob ``project_directory``, ADR-5), esa base
+    GANA al corte como ``PROJECT_ROOT``; el SO se fuerza al inyectado si el
+    contexto no lo resolvio (scripts untitled o fuera de toda root). Con
+    ``base`` inyectada el proyecto manda sobre las raices del perfil (AD7):
+    las PYTHON_* se derivan del hermano ``reconstruir_rutas`` de la raiz
+    resuelta. Sin ``base``, las PYTHON_* son las raices del perfil para el SO.
+    No muta ``os.environ`` ni ``__main__``; idem inputs -> idem outputs.
     """
-    base_resuelta = base if base is not None else rutas_engine.ruta_para_plataforma(
-        perfil, so
-    )
     contexto = rutas_engine.get_context(perfil, ruta_plato)
-    if base_resuelta is None:
-        base_resuelta = contexto.get("base")
-    if base_resuelta is not None:
-        contexto["base"] = base_resuelta
+    if base is not None:
+        # La base inyectada es un override (knob project_directory): GANA al
+        # corte estructural (ADR-3/ADR-5), igual que en el contrato V1.
+        contexto["project_root"] = base
+    if not contexto.get("so"):
         contexto["so"] = so
-    return rutas_engine.variables_entorno(contexto)
+    perfil_para_env = None if base is not None else perfil
+    return rutas_engine.variables_entorno(contexto, perfil=perfil_para_env)
 
 
 # --- Resolucion del store de perfiles ------------------------------------------

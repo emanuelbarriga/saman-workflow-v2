@@ -1,6 +1,8 @@
-"""Tests del dialogo fino del Path Manager (cambio path-manager-panel, slice P2).
+"""Tests del dialogo fino del Path Manager — contrato usuario-solo (S1).
 
-Cubre el widget ``SamanTools/ui/path_manager_panel.py`` (TDD estricto, pytest-qt):
+Cubre el widget ``SamanTools/ui/path_manager_panel.py`` (TDD estricto, pytest-qt)
+con el esquema 3x3 de perfil-por-usuario (AD2): el dialogo trabaja con el
+usuario, sin hostname.
 
 * REQ-1 (escenario "profile and status rendered from helper data") — el dialogo
   con un perfil conocido renderiza la raiz ficticia del SO actual y el estado
@@ -19,8 +21,9 @@ Cubre el widget ``SamanTools/ui/path_manager_panel.py`` (TDD estricto, pytest-qt
   sesion grafica (``nuke.GUI`` falso) o sin PySide disponible degrada en
   silencio: nunca lanza y no crea ventana.
 
-Todas las rutas son ficticias (``/Volumes/estudio/2026``, ``L:/VFX/2026``,
-``/mnt/estudio/2026``); ninguna ruta real del estudio aparece en fixtures.
+Todas las rutas son ficticias (``/Volumes/estudio/2026/CINE/...``,
+``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``); ninguna ruta real
+del estudio aparece en fixtures.
 """
 
 import json
@@ -40,9 +43,21 @@ from SamanTools.ui import path_manager  # noqa: E402
 from SamanTools.ui import path_manager_panel  # noqa: E402
 
 _ROOTS = {
-    "macOS": "/Volumes/estudio/2026",
-    "Windows": "L:/VFX/2026",
-    "Linux": "/mnt/estudio/2026",
+    "TO_VFX": {
+        "macOS": "/Volumes/estudio/2026/CINE/TO_VFX",
+        "Windows": "L:/VFX/2026/CINE/TO_VFX",
+        "Linux": "/mnt/estudio/2026/CINE/TO_VFX",
+    },
+    "COMP": {
+        "macOS": "/Volumes/estudio/2026/CINE/COMP",
+        "Windows": "L:/VFX/2026/CINE/COMP",
+        "Linux": "/mnt/estudio/2026/CINE/COMP",
+    },
+    "FROM_VFX": {
+        "macOS": "/Volumes/estudio/2026/CINE/FROM_VFX",
+        "Windows": "L:/VFX/2026/CINE/FROM_VFX",
+        "Linux": "/mnt/estudio/2026/CINE/FROM_VFX",
+    },
 }
 
 
@@ -129,25 +144,25 @@ def _spy_aplicar_env(monkeypatch):
 
 def test_dialogo_conocido_muestra_raiz_y_estado(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": {"hosts": {"ws1": _ROOTS}}})
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
     env_antes = dict(os.environ)
 
-    estado = path_manager.estado_panel(ruta, "ana", "ws1", "macOS")
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", "ws1", ruta, "macOS")
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
     qtbot.addWidget(dialogo)
 
-    assert dialogo.label_perfil.text() == "Raiz actual: /Volumes/estudio/2026"
+    assert dialogo.label_perfil.text() == "Raiz actual: /Volumes/estudio/2026/CINE/TO_VFX"
     assert dialogo.label_unidad.text() == "Unidad: Conectado."
     assert dict(os.environ) == env_antes
 
 
 def test_dialogo_abrir_y_cancelar_no_muta_env(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": {"hosts": {"ws1": _ROOTS}}})
-    estado = path_manager.estado_panel(ruta, "ana", "ws1", "macOS")
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
     env_antes = dict(os.environ)
 
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", "ws1", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
     qtbot.addWidget(dialogo)
 
     dialogo.boton_cerrar.click()  # cancelar sin submit
@@ -171,23 +186,23 @@ def test_panel_env_solo_via_injector():
 
 def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"pedro": {"hosts": {"ws2": _ROOTS}}})
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
 
     aseguraron = []
     real_asegurar = rutas_engine.asegurar_perfil
 
-    def spy_asegurar(usuario, hostname, ruta_store, **kwargs):
-        aseguraron.append((usuario, hostname, kwargs))
-        return real_asegurar(usuario, hostname, ruta_store, **kwargs)
+    def spy_asegurar(usuario, ruta_store, **kwargs):
+        aseguraron.append((usuario, ruta_store, kwargs))
+        return real_asegurar(usuario, ruta_store, **kwargs)
 
     monkeypatch.setattr(rutas_engine, "asegurar_perfil", spy_asegurar)
     cacheados, aplicados = _spy_aplicar_env(monkeypatch)
     fake_nuke = _NukeFake()
     monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
 
-    estado = path_manager.estado_panel(ruta, "nuevo", "pc9", "macOS")
+    estado = path_manager.estado_panel(ruta, "nuevo", "macOS")
     assert estado["conocido"] is False
-    dialogo = path_manager_panel.PathManagerDialog(estado, "nuevo", "pc9", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(estado, "nuevo", ruta, "macOS")
     qtbot.addWidget(dialogo)
 
     assert dialogo.label_perfil.text() == "Onboarding: defina la base del proyecto"
@@ -197,14 +212,14 @@ def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_
 
     assert len(aseguraron) == 1
     assert aseguraron[0][0] == "nuevo"
-    assert aseguraron[0][1] == "pc9"
+    assert aseguraron[0][1] == ruta
     assert aseguraron[0][2]["base"] == "/Volumes/estudio/2026"
     assert aplicados[-1]["PROJECT_ROOT"] == "/Volumes/estudio/2026"
     assert cacheados[-1] == aplicados[-1]
     assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2026"
     assert fake_nuke.messages, "el submit debe informar al artista via nuke.message"
     guardado = rutas_engine.leer_perfiles(ruta)
-    assert guardado["nuevo"]["hosts"]["pc9"]["macOS"] == "/Volumes/estudio/2026"
+    assert guardado["nuevo"]["COMP"]["macOS"] == "/Volumes/estudio/2026/COMP"
 
 
 # ---------------------------------------------------------------------------
@@ -214,13 +229,13 @@ def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_
 
 def test_cambio_base_reaplica_env_2027(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": {"hosts": {"ws1": _ROOTS}}})
+    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
     _, aplicados = _spy_aplicar_env(monkeypatch)
     fake_nuke = _NukeFake()
     monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
 
-    estado = path_manager.estado_panel(ruta, "ana", "ws1", "macOS")
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", "ws1", ruta, "macOS")
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
     qtbot.addWidget(dialogo)
 
     dialogo.campo_base.setText("/Volumes/estudio/2027")
@@ -230,8 +245,8 @@ def test_cambio_base_reaplica_env_2027(qtbot, monkeypatch, tmp_path):
     assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2027"
     assert fake_nuke.messages, "el submit debe informar al artista via nuke.message"
     guardado = rutas_engine.leer_perfiles(ruta)
-    assert guardado["ana"]["hosts"]["ws1"]["macOS"] == "/Volumes/estudio/2027"
-    assert guardado["ana"]["hosts"]["ws1"]["Windows"] == "L:/VFX/2026"
+    assert guardado["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2027/COMP"
+    assert guardado["ana"]["COMP"]["Windows"] == "L:/VFX/2026/CINE/COMP"
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +257,7 @@ def test_cambio_base_reaplica_env_2027(qtbot, monkeypatch, tmp_path):
 def test_abrir_dialogo_sin_gui_no_levanta(monkeypatch):
     fake = _NukeFake(gui=False)
     res = path_manager_panel.abrir_dialogo(
-        nuke_mod=fake, usuario="ana", hostname="ws1", ruta_store="x", so="macOS"
+        nuke_mod=fake, usuario="ana", ruta_store="x", so="macOS"
     )
     assert res is None
     assert fake.messages == []
@@ -269,7 +284,7 @@ def test_abrir_dialogo_sin_pyside_no_levanta(monkeypatch):
     modulo = importlib.import_module("SamanTools.ui.path_manager_panel")
     fake = _NukeFake(gui=True)
     res = modulo.abrir_dialogo(
-        nuke_mod=fake, usuario="ana", hostname="ws1", ruta_store="x", so="macOS"
+        nuke_mod=fake, usuario="ana", ruta_store="x", so="macOS"
     )
     assert res is None
     assert fake.messages == []

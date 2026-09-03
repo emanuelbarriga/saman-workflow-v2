@@ -188,6 +188,32 @@ def reconstruir_rutas(ruta_base, proyecto):
     return rutas
 
 
+def raiz_proyecto_desde_ruta(ruta, marcadores=("TO_VFX", "COMP", "FROM_VFX")):
+    """Corta la raiz del proyecto por el PRIMER segmento marcador (AD4).
+
+    Pura de strings (sin filesystem, sin nuke/PySide): normaliza backslashes
+    a forward slashes, limpia espacios y separadores finales, y devuelve la
+    porcion anterior al primer segmento que coincide (case-insensitive, como
+    SEGMENTO completo) con cualquier marcador. La coincidencia es por
+    segmento exacto, no por subcadena: ``COMPlex`` NO matchea ``COMP`` y
+    ``.saman`` nunca es marcador. Sin marcador, ruta vacia o marcador como
+    PRIMER segmento (no queda raiz previa) -> ``None``. Es la derivacion
+    PRIMARIA de ``PROJECT_ROOT`` (la deteccion por base es secundaria).
+    """
+    ruta_s = str(ruta or "").replace("\\", "/").strip().rstrip("/")
+    if not ruta_s:
+        return None
+    marcas = {str(m).lower() for m in marcadores}
+    partes = ruta_s.split("/")
+    for indice, parte in enumerate(partes):
+        if parte.lower() in marcas:
+            if indice == 0:
+                return None
+            raiz = "/".join(partes[:indice])
+            return raiz or None
+    return None
+
+
 def proyecto_desde_ruta(ruta, base=None, so=None):
     """
     Identifica el proyecto a partir de la ruta de un archivo bajo la matriz.
