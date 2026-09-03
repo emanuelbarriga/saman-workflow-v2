@@ -42,10 +42,13 @@ uno tiene su root por plataforma.
     ``carpeta_salida`` SIEMPRE ``"[getenv PROJECT_ROOT]/COMP/"`` (AD3).
   - ``variables_entorno(contexto, perfil=None)``: contrato TCL como DATOS —
     ``PROJECT_ROOT`` por corte (NUNCA base); PYTHON_TO_VFX/COMP/FROM_VFX desde
-    las raices del perfil para el SO actual; espacio faltante → fallback
-    hermano ``reconstruir_rutas(dirname, basename)`` del corte (AD7, sin slash
-    final); clave irresoluble OMITIDA, nunca ``""``. NUNCA muta
-    ``os.environ``: la inyeccion la hace la capa de carga, no el motor.
+    las raices del perfil para el SO actual; espacio canonico faltante →
+    fallback hermano ``reconstruir_rutas(dirname, basename)`` del corte
+    (AD7, sin slash final); espacios EXTRA (claves fuera de ``_ESPACIOS``)
+    emiten ``PYTHON_<sufijo>`` SORTED despues del trio canonico (D3), y si su
+    root falta o la clave no sanitiza se OMITEN (D4, nunca ``""``); clave
+    irresoluble OMITIDA, nunca ``""``. NUNCA muta ``os.environ``: la
+    inyeccion la hace la capa de carga, no el motor.
 
 Lock (D6): exclusivo sobre un archivo HERMANO ``path + ".lock"`` — nunca el
 target: ``os.replace`` cambia el inode y un lock ahi quedaria huerfano tras la
@@ -71,6 +74,38 @@ from .nombres import parsear_plato
 # Espacios del esquema 3x3 (AD1) y razas de SO soportadas.
 _ESPACIOS = ("TO_VFX", "COMP", "FROM_VFX")
 _PLATAFORMAS_SOPORTADAS = ("macOS", "Windows", "Linux")
+
+# Sufijos de clave de entorno reservados (R2): nombres legacy del store que
+# nunca deben emitirse como variable de entorno PYTHON_*.
+_CLAVES_ENTORNO_RESERVADAS = ("HOSTS", "DEFAULT")
+
+
+def _clave_env_para_espacio(nombre):
+    """Convierte un nombre de espacio extra en sufijo de clave de entorno.
+
+    UPPERCASE; cada caracter fuera de ``A-Z0-9`` → ``_``; colapsa corridas de
+    ``_``; ``strip("_")``. Lanza ``ValueError`` si el resultado queda VACIO
+    tras sanitizar (incluye nombres que sanitizan a nada), si el nombre
+    contiene ``/`` o llaves JSON (R8) o si el sufijo es reservado
+    ``HOSTS``/``DEFAULT`` (R2). El call site antepone ``"PYTHON_"`` al sufijo
+    para formar la clave completa (spec).
+    """
+    s = str(nombre or "").upper()
+    if "/" in s or "{" in s or "}" in s:
+        raise ValueError(
+            f"Nombre de espacio invalido para clave de entorno: {nombre!r} "
+            "(contiene '/' o llaves JSON)"
+        )
+    s = re.sub(r"[^A-Z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        raise ValueError(
+            f"Nombre de espacio invalido para clave de entorno: {nombre!r} "
+            "(vacio tras sanitizar)"
+        )
+    if s in _CLAVES_ENTORNO_RESERVADAS:
+        raise ValueError(f"Nombre de espacio reservado: {nombre!r}")
+    return s
 
 # Raices ficticias por plataforma (nunca rutas reales del estudio).
 _RAICES_FICTICIAS = {
@@ -495,12 +530,16 @@ def variables_entorno(contexto, perfil=None):
 
     ``PROJECT_ROOT`` = raiz de proyecto por corte estructural del contexto
     (NUNCA base). PYTHON_TO_VFX / PYTHON_COMP / PYTHON_FROM_VFX = raices del
-    perfil para el SO del contexto; si el espacio falta, cae al fallback
-    HERMANO ``reconstruir_rutas(dirname, basename)`` de la propia raiz de
-    proyecto (contrato de knob V1 intacto) SIN slash final. Clave irresoluble
-    → OMITIDA, nunca ``""`` (AD7). ``os.environ`` nunca se toca: la inyeccion
-    real (para el TCL ``[getenv PROJECT_ROOT]`` de Nuke via addOnScriptLoad)
-    la hace la capa de carga.
+    perfil para el SO del contexto; si el espacio CANONICO falta, cae al
+    fallback HERMANO ``reconstruir_rutas(dirname, basename)`` de la propia
+    raiz de proyecto (contrato de knob V1 intacto) SIN slash final. Cada
+    espacio EXTRA del perfil (clave fuera de ``_ESPACIOS``) emite
+    ``PYTHON_<sufijo>`` (via ``_clave_env_para_espacio``) SORTED
+    lexicograficamente DESPUES del trio canonico (D3); un extra sin root para
+    el SO, o cuya clave no sanitiza (D4), se OMITE — nunca ``""`` y nunca
+    raise. Clave irresoluble → OMITIDA (AD7). ``os.environ`` nunca se toca:
+    la inyeccion real (para el TCL ``[getenv PROJECT_ROOT]`` de Nuke via
+    addOnScriptLoad) la hace la capa de carga.
     """
     if not isinstance(contexto, dict):
         return {}
@@ -527,16 +566,27 @@ def variables_entorno(contexto, perfil=None):
         "FROM_VFX": "FROM_VFX_SERVER_",
     }
     suf = sufijo_so(so)
-    for espacio in _ESPACIOS:
+    # Canonicos en orden _ESPACIOS + extras SORTED (D3); determinista.
+    extras = sorted(k for k in perfil if k not in _ESPACIOS) if perfil else []
+    for espacio in list(_ESPACIOS) + extras:
         root = None
         if perfil is not None:
             raices = perfil.get(espacio)
             if isinstance(raices, dict):
                 root = raices.get(so)
-        if root is None and reconstruidas is not None:
+        # Fallback hermano SOLO para canonicos (R6): los extras nunca heredan.
+        if root is None and espacio in _ESPACIOS and reconstruidas is not None:
             root = reconstruidas.get(claves_knob[espacio] + suf)
-        if root:
-            env["PYTHON_" + espacio] = str(root).replace("\\", "/").strip().rstrip("/")
+        if not root:
+            continue
+        if espacio in _ESPACIOS:
+            clave = "PYTHON_" + espacio
+        else:
+            try:
+                clave = "PYTHON_" + _clave_env_para_espacio(espacio)
+            except ValueError:
+                continue  # D4: clave de store sucia → omitida, nunca raise ni ""
+        env[clave] = str(root).replace("\\", "/").strip().rstrip("/")
     return env
 
 
