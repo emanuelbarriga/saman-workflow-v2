@@ -91,6 +91,7 @@ def _restaurar_estado(monkeypatch):
 
     env_antes = dict(os.environ)
     main_antes = {k: v for k, v in vars(__main__).items() if k.isupper()}
+    inj_antes = (injector._env_cache, injector._env_inyectado)
     injector._env_cache = None
     injector._env_inyectado = False
     yield
@@ -103,6 +104,7 @@ def _restaurar_estado(monkeypatch):
     for clave in set(vars(__main__)) - set(main_antes):
         if clave.isupper():
             delattr(__main__, clave)
+    injector._env_cache, injector._env_inyectado = inj_antes
 
 
 class _NukeFake:
@@ -1050,3 +1052,296 @@ def test_abrir_dialogo_sin_pyside_no_levanta(monkeypatch):
     )
     assert res is None
     assert fake.messages == []
+
+
+# ---------------------------------------------------------------------------
+# Espacios EXTRA (PR 4, spec panel-path-manager-widget): subarbol separado,
+# filas con nombre+ruta+semaforo, OS por fila (D2), add/OK/[-] con env por
+# injector, nombre invalido informado sin escribir (D8).
+# ---------------------------------------------------------------------------
+
+_RAICES_3D = {
+    "macOS": "/Volumes/estudio/2026/CINE/3D",
+    "Windows": "L:/VFX/2026/CINE/3D",
+    "Linux": "/mnt/estudio/2026/CINE/3D",
+}
+_RAICES_PREVIEW = {
+    "macOS": "/Volumes/estudio/2026/CINE/PREVIEW",
+    "Windows": "L:/VFX/2026/CINE/PREVIEW",
+    "Linux": "/mnt/estudio/2026/CINE/PREVIEW",
+}
+_RAICES_MATTE_PAINT = {
+    "macOS": "/Volumes/estudio/2026/CINE/MATTE_PAINT",
+    "Windows": "L:/VFX/2026/CINE/MATTE_PAINT",
+    "Linux": "/mnt/estudio/2026/CINE/MATTE_PAINT",
+}
+
+
+def _perfil_con_extras(perfil, **extras):
+    """Copia del perfil 3x3 mas los espacios extra indicados (sin alias)."""
+    copia = {esp: dict(raices) for esp, raices in perfil.items()}
+    for clave, raices in extras.items():
+        copia[clave] = dict(raices)
+    return copia
+
+
+def _estado_unidad_extras(base):
+    """estado_unidad realista para extras: ruta vacia -> desconectado-vacia."""
+    if not base or not str(base).strip():
+        return {
+            "conectado": False,
+            "ruta": None,
+            "detalle": "Ruta base vacia: configure 'Ruta Base' en el nodo.",
+        }
+    return _marcar_conectado(base)
+
+
+def _nombres_filas_extra(dialogo):
+    """Nombres de los espacios extra renderizados, en orden de fila."""
+    return [fila["espacio"] for fila in dialogo.filas_extras]
+
+
+def _construir_dialogo_extras(tmp_path, qtbot, perfil, so="macOS", usuario="ana", perfiles=None):
+    """Store ficticio con canonico + extras y dialogo en modo normal."""
+    ruta = _escribir_store(tmp_path, {usuario: perfil})
+    estado = path_manager.estado_panel(ruta, usuario, so)
+    dialogo = _construir_dialogo(
+        path_manager_panel.PathManagerDialog,
+        estado, usuario, ruta, so,
+        perfiles=perfiles or [usuario], qtbot=qtbot,
+    )
+    return dialogo, ruta
+
+
+def test_extras_subarbol_separado_y_oculto_hasta_checkbox_avanzado(qtbot, monkeypatch, tmp_path):
+    """Spec 'canonical key order stays intact': los extras viven en un subarbol
+    SEPARADO de ``grupo_avanzado``, oculto con el checkbox desmarcado."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, _ = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+
+    assert hasattr(dialogo, "grupo_extras")
+    assert dialogo.grupo_extras is not dialogo.grupo_avanzado
+    assert dialogo.grupo_extras.isHidden() is True
+    assert list(dialogo.campos_avanzados) == ["COMP", "FROM_VFX", "TO_VFX"]
+    assert [f["espacio"] for f in dialogo.filas_extras] == ["3D"]
+
+    dialogo.checkbox_avanzado.setChecked(True)
+    assert dialogo.grupo_extras.isHidden() is False
+
+
+def test_extras_filas_render_nombre_ruta_y_semaforo(qtbot, monkeypatch, tmp_path):
+    """Spec 'extra rows render from the profile': dos filas con nombre, raiz
+    del SO detectado y estado de unidad (D2: default = ``self.so``)."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(
+        _ROOT_2026, **{"MATTE_PAINT": _RAICES_MATTE_PAINT, "3D": _RAICES_3D}
+    )
+    dialogo, _ = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    dialogo.checkbox_avanzado.setChecked(True)
+
+    assert _nombres_filas_extra(dialogo) == ["3D", "MATTE_PAINT"]
+    fila_3d = dialogo.filas_extras[0]
+    fila_matte = dialogo.filas_extras[1]
+    assert fila_3d["combo_so"].currentText() == "macOS"
+    assert fila_3d["campo"].text() == "/Volumes/estudio/2026/CINE/3D"
+    assert fila_matte["campo"].text() == "/Volumes/estudio/2026/CINE/MATTE_PAINT"
+    assert fila_3d["semaforo"].text().startswith("OK")
+    assert fila_matte["semaforo"].text().startswith("OK")
+
+
+def test_extras_etiqueta_so_muestra_so_detectado(qtbot, monkeypatch, tmp_path):
+    """Spec: la etiqueta de informacion muestra el SO detectado (self.so)."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, _ = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+
+    assert "macOS" in dialogo.etiqueta_so_extras.text()
+
+
+def test_extras_os_switch_desconecta_y_restaura(qtbot, monkeypatch, tmp_path):
+    """Spec 'per-row OS selector switches the slot': sin raiz Windows la fila
+    muestra el estado desconectado de 'Ruta base vacia' y al volver a macOS
+    restaura raiz y semaforo."""
+    monkeypatch.setattr(entorno, "estado_unidad", _estado_unidad_extras)
+    perfil = _perfil_con_extras(
+        _ROOT_2026, **{"3D": {"macOS": "/Volumes/estudio/2026/CINE/3D"}}
+    )
+    dialogo, _ = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    dialogo.checkbox_avanzado.setChecked(True)
+    fila = dialogo.filas_extras[0]
+
+    fila["combo_so"].setCurrentIndex(fila["combo_so"].findText("Windows"))
+    assert fila["campo"].text() == ""
+    assert fila["semaforo"].text().startswith("ERROR")
+    assert "Ruta base vacia" in fila["semaforo"].text()
+
+    fila["combo_so"].setCurrentIndex(fila["combo_so"].findText("macOS"))
+    assert fila["campo"].text() == "/Volumes/estudio/2026/CINE/3D"
+    assert fila["semaforo"].text().startswith("OK")
+
+
+def test_agregar_extra_persiste_y_aplica_env(qtbot, monkeypatch, tmp_path):
+    """Spec 'add validates, persists and re-applies env': 'preview' persiste
+    como PREVIEW y el env aplicado lleva PYTHON_PREVIEW (via injector)."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+
+    dialogo.campo_nombre_extra.setText("preview")
+    dialogo.campo_ruta_extra.setText("/Volumes/estudio/2026/CINE/PREVIEW")
+    dialogo.boton_agregar_extra.click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado["ana"]["PREVIEW"]["macOS"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+    assert guardado["ana"]["3D"] == _RAICES_3D
+    assert aplicados[-1]["PYTHON_PREVIEW"] == "/Volumes/estudio/2026/CINE/PREVIEW"
+    assert cacheados[-1] == aplicados[-1]
+    assert _nombres_filas_extra(dialogo) == ["3D", "PREVIEW"]
+    assert fake_nuke.messages, "el add informa al artista via nuke.message"
+
+
+def test_agregar_extra_nombre_invalido_informa_sin_escribir(qtbot, monkeypatch, tmp_path):
+    """Spec 'invalid name is surfaced without write': 'hosts' (R2) se informa
+    via nuke.message y NO escribe ni llega env ni aparece fila."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+
+    dialogo.campo_nombre_extra.setText("hosts")
+    dialogo.campo_ruta_extra.setText("/Volumes/estudio/2026/CINE/HOSTS")
+    dialogo.boton_agregar_extra.click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado == {"ana": _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})}
+    assert cacheados == [] and aplicados == []
+    assert _nombres_filas_extra(dialogo) == ["3D"]
+    assert fake_nuke.messages, "el nombre invalido se informa via nuke.message"
+
+
+def test_agregar_extra_nombre_o_ruta_vacio_informa_sin_escribir(qtbot, monkeypatch, tmp_path):
+    """Edge del add: nombre o ruta vacios se informan antes de validar (sin
+    tocar el store ni el env)."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+    antes = rutas_engine.leer_perfiles(ruta)
+
+    dialogo.campo_nombre_extra.setText("   ")
+    dialogo.campo_ruta_extra.setText("/Volumes/estudio/2026/CINE/X")
+    dialogo.boton_agregar_extra.click()
+    assert rutas_engine.leer_perfiles(ruta) == antes
+    assert cacheados == [] and aplicados == []
+    assert fake_nuke.messages and "nombre" in fake_nuke.messages[-1]
+
+    dialogo.campo_nombre_extra.setText("preview")
+    dialogo.campo_ruta_extra.setText("   ")
+    dialogo.boton_agregar_extra.click()
+    assert rutas_engine.leer_perfiles(ruta) == antes
+    assert cacheados == [] and aplicados == []
+    assert fake_nuke.messages and "ruta" in fake_nuke.messages[-1]
+
+
+def test_agregar_extra_so_del_combo_slot_del_so_elegido(qtbot, monkeypatch, tmp_path):
+    """D2: el add usa el SO del combo de la fila nueva (default self.so, pero
+    el artista puede cambiar el slot donde aterriza la raiz)."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    _, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+    dialogo.combo_so_extra.setCurrentIndex(
+        dialogo.combo_so_extra.findText("Windows")
+    )
+
+    dialogo.campo_nombre_extra.setText("preview")
+    dialogo.campo_ruta_extra.setText("L:/VFX/2026/CINE/PREVIEW")
+    dialogo.boton_agregar_extra.click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado["ana"]["PREVIEW"]["Windows"] == "L:/VFX/2026/CINE/PREVIEW"
+    assert "macOS" not in guardado["ana"]["PREVIEW"]
+    assert aplicados[-1]["PYTHON_PREVIEW"] == "L:/VFX/2026/CINE/PREVIEW"
+    assert fake_nuke.messages, "el add informa al artista via nuke.message"
+
+
+def test_ok_extra_ruta_vacia_informa_sin_escribir(qtbot, monkeypatch, tmp_path):
+    """Edge del OK: ruta vacia en la fila se informa y no escribe nada."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+    fila = dialogo.filas_extras[0]
+    guardado_antes = rutas_engine.leer_perfiles(ruta)
+
+    fila["campo"].setText("   ")
+    fila["boton_ok"].click()
+
+    assert rutas_engine.leer_perfiles(ruta) == guardado_antes
+    assert cacheados == [] and aplicados == []
+    assert fake_nuke.messages and "ruta" in fake_nuke.messages[-1].lower()
+
+
+def test_ok_extra_persiste_ruta_editada_y_aplica_env(qtbot, monkeypatch, tmp_path):
+    """D6: el OK de una fila extra persiste SOLO el slot (extra, so) via
+    preparar_cambio_base y propaga env por injector."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(_ROOT_2026, **{"3D": _RAICES_3D})
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    _, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+    fila = dialogo.filas_extras[0]
+
+    fila["campo"].setText("/Volumes/estudio/2026/CINE/3D_V2")
+    fila["boton_ok"].click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert guardado["ana"]["3D"]["macOS"] == "/Volumes/estudio/2026/CINE/3D_V2"
+    assert guardado["ana"]["3D"]["Windows"] == "L:/VFX/2026/CINE/3D"
+    assert guardado["ana"]["COMP"] == _ROOT_2026["COMP"]
+    assert aplicados[-1]["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D_V2"
+    assert fake_nuke.messages, "el OK informa al artista via nuke.message"
+
+
+def test_quitar_extra_elimina_fila_y_reaplica_env(qtbot, monkeypatch, tmp_path):
+    """Spec 'remove deletes the extra, canonical untouched': el [-] quita la
+    fila de 3D, los canonicos quedan y el env re-aplicado no lleva PYTHON_3D."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    perfil = _perfil_con_extras(
+        _ROOT_2026, **{"3D": _RAICES_3D, "PREVIEW": _RAICES_PREVIEW}
+    )
+    dialogo, ruta = _construir_dialogo_extras(tmp_path, qtbot, perfil)
+    _, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    dialogo.checkbox_avanzado.setChecked(True)
+    fila_3d = dialogo.filas_extras[0]
+
+    fila_3d["boton_quitar"].click()
+
+    guardado = rutas_engine.leer_perfiles(ruta)
+    assert "3D" not in guardado["ana"]
+    assert guardado["ana"]["PREVIEW"] == _RAICES_PREVIEW
+    assert guardado["ana"]["COMP"] == _ROOT_2026["COMP"]
+    assert "PYTHON_3D" not in aplicados[-1]
+    assert _nombres_filas_extra(dialogo) == ["PREVIEW"]
+    assert fake_nuke.messages, "el [-] informa al artista via nuke.message"
