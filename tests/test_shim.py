@@ -454,3 +454,30 @@ _PATRON_NUKE_NIVEL_MODULO = re.compile(r"^import\s+nuke\b|^from\s+nuke\b", re.M)
 def test_shim_sin_import_nuke_a_nivel_modulo():
     fuente = Path(rutas.__file__).read_text(encoding="utf-8")
     assert _PATRON_NUKE_NIVEL_MODULO.search(fuente) is None
+
+
+def test_shim_sobrevive_sin_hostname():
+    """D8 (perfil-por-usuario): el shim V1 sobrevive al modelo user-only.
+
+    El modelo nuevo (AD2) resuelve el perfil SOLO por usuario y elimino la
+    escalera hostname: el shim debe seguir delegando como siempre — sin
+    firma con hostname, sin llamadas al motor de perfiles
+    (``resolver_perfil``/``leer_perfiles``/``guardar_perfiles``) y sin
+    importar ``rutas_engine``. Cualquier regresion de esas rompe este
+    marker (proof D8: el shim NO se toca en el cambio).
+    """
+    import inspect
+
+    fuente = Path(rutas.__file__).read_text(encoding="utf-8")
+    assert "hostname" not in fuente
+    assert "resolver_perfil" not in fuente
+    assert "leer_perfiles" not in fuente
+    assert "guardar_perfiles" not in fuente
+    assert "rutas_engine" not in fuente
+    for nombre in (
+        "actualizar",
+        "aplicar_proyecto",
+        "refrescar_fuentes",
+        "refrescar_estado",
+    ):
+        assert "hostname" not in inspect.signature(getattr(rutas, nombre)).parameters

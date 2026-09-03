@@ -1,7 +1,8 @@
 # SamanTools V2 — Architecture & V1/V2 Coexistence
 
-> Technical artifact (English). Change `load-contract`, slice H5. Fictitious
-> paths only — this repository is PUBLIC and must never carry real studio
+> Technical artifact (English). Changes `load-contract` (slice H5) and
+> `perfil-por-usuario` (slice S5, per-user profile model). Fictitious paths
+> only — this repository is PUBLIC and must never carry real studio
 > absolute paths, credentials, or hostnames.
 
 ## Overview
@@ -13,7 +14,9 @@ lazy-import compat shim (`SamanTools/rutas.py`), a pure/thin load injector
 (`SamanTools/ui/menu.py`). The env contract stays data-driven; the injector
 applies it at `addOnScriptLoad` so TCL `[getenv PROJECT_ROOT]` resolves in
 Read/Write nodes, and re-asserts the cached dict at `addOnScriptSave`
-(memory only — no disk, no lock).
+(memory only — no disk, no lock). Composition roots come from a **per-user
+profile store** (3 spaces × 3 OS per user) resolved project-first — see
+[Per-user profile model](#per-user-profile-model) below.
 
 ## V1/V2 Coexistence
 
@@ -60,12 +63,43 @@ documented here only.
 - The shim follows the same precedence chain as the injector and never
   clobbers an environment the injector already wrote this session
   (`_env_inyectado` guard).
+- The per-user model leaves this shim untouched (D8): it holds no
+  hostname-signed profile call and never imports the profile engine, so the
+  V1 knob contract above keeps working unchanged.
+
+## Profile store: project-first chain
+
+The profile-store path (AD5, `perfil-por-usuario`) resolves PROJECT-FIRST:
+
+1. `{project_root}/.saman/nuke_profiles.json` — the project store; ALWAYS
+   wins when the file exists. Existence is probed against dead mounts
+   (anti-hang), and `.saman/` is NEVER created on read: it is born lazily
+   on the first write, under lock.
+2. `NUKE_PROFILES_PATH` (env) → scoped `SamanTools.config_local` → JSON
+   sibling `config_local.json` → `~/.config/saman/nuke_profiles.json`
+   (final default).
+
+The project root comes from `nuke.root().name()` via
+`core.entorno.raiz_proyecto_desde_ruta` (structural cut at the first
+`TO_VFX|COMP|FROM_VFX` marker segment; `.saman` is deliberately NOT a
+marker). Untitled scripts or plates outside any root start the chain at the
+env link.
+
+## Per-user profile model
+
+- Schema (D1/AD1): envelope
+  `{"perfiles": {user: {TO_VFX|COMP|FROM_VFX: {macOS|Windows|Linux: root}}}}`
+  — one store file, users as keys, three independent spaces × three OS
+  roots per user.
+- Resolution is USER-ONLY (AD2): `resolver_perfil(user, path)` reads
+  `perfiles.get(user)` directly; the V1 hostname ladder and the
+  foreign-host fallback are GONE. Unknown or legacy users get silent
+  onboarding with fictitious 3×3 roots.
+- `carpeta_salida` is always the token `[getenv PROJECT_ROOT]/COMP/`,
+  resolved at script-load time (R4 — breaking for consumers of the old
+  resolved path).
 
 ## Local studio override (gitignored)
-
-The profile-store path resolves in this order:
-`NUKE_PROFILES_PATH` (env) → scoped `SamanTools.config_local` → JSON sibling
-`config_local.json` → `~/.config/saman/nuke_profiles.json` (final default).
 
 The local override MUST be a scoped module **inside the package**
 (`SamanTools/config_local.py`), never a bare `config_local.py` at the
@@ -85,6 +119,33 @@ NUKE_PROFILES_PATH = ""
 
 Alternatives: leave the file absent (fall through to home default) or ship a
 sibling `config_local.json` next to the module with the same key.
+
+## Path Manager selector
+
+- `SamanTools > Path Manager...` (Ctrl+Alt+R, fallback Ctrl+Alt+O on
+  collision) opens the profile selector dialog.
+- The combo lists the users present in the resolved store, preselecting the
+  ambient user (`getpass.getuser()`).
+- Selecting a user applies the profile instantly: `preparar_seleccion_perfil`
+  → `cachear_env` + `aplicar_entorno` → re-evaluate Read nodes so
+  `[getenv PROJECT_ROOT]` resolves with the new env. A stale store
+  (`ValueError`) is reported without applying a partial env.
+- Unknown users get the onboarding form (base → fictitious 3×3 roots);
+  known users can change the base per space. Headless sessions degrade
+  silently (no window, no exception). A legacy-shaped entry triggers a
+  one-time regeneration warning on open (read-only flag; the engine
+  regenerates the row on the next write).
+
+## Release note R4
+
+- Project store wins: `{project_root}/.saman/nuke_profiles.json` beats any
+  shared or home store when it exists.
+- Foreign-host fallback gone: hostname no longer participates in profile
+  resolution (AD2); resolution is per user only.
+- `carpeta_salida` → `[getenv PROJECT_ROOT]/COMP/` (token resolved at load;
+  breaking for consumers of the old resolved path).
+- Legacy profile rows regenerate to the 3×3 shape on the next write, with a
+  one-time UI warning.
 
 ## Integrity chain
 
