@@ -38,9 +38,9 @@ Scope: engine + helper + widget + tests only; injector/menu/shim untouched (no n
 
 ## Phase 2: Engine removal (PR 2)
 
-- [ ] 2.1 RED: `eliminar_espacio_store` — target key only removed; absent key → no-op `_bytes_store`; unknown user → ValueError; canonical → ValueError (D1)
-- [ ] 2.2 RED: race — Barrier(2) workers remove `3D`/`PREVIEW`; both persist, canonicals intact, no temp files (skipif win32)
-- [ ] 2.3 GREEN: implement mirroring `renombrar_perfil_store` (:338-356): lock, re-read, guards, pop, `_escribir_perfiles`
+- [x] 2.1 RED: `eliminar_espacio_store` — target key only removed; absent key → no-op `_bytes_store`; unknown user → ValueError; canonical → ValueError (D1)
+- [x] 2.2 RED: race — Barrier(2) workers remove `3D`/`PREVIEW`; both persist, canonicals intact, no temp files (skipif win32)
+- [x] 2.3 GREEN: implement mirroring `renombrar_perfil_store` (:338-356): lock, re-read, guards, pop, `_escribir_perfiles`
 
 ## Phase 3: Helper (PR 3)
 
