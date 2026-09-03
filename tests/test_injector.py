@@ -327,9 +327,9 @@ def test_store_proyecto_gana_siempre(tmp_path, monkeypatch, sin_config_local_rea
     assert injector.obtener_ruta_store(str(raiz)) == str(store)
 
 
-def test_store_proyecto_sin_archivo_cae_al_env(tmp_path, monkeypatch, sin_config_local_real):
-    """Triangulacion: el dirname responde pero sin ``nuke_profiles.json``
-    el probe falla y la cadena cae al env var."""
+def test_store_proyecto_sin_archivo_gana_si_dirname_responde(tmp_path, monkeypatch, sin_config_local_real):
+    """UX fix: si el dirname ``{raiz}/.saman`` responde aunque no exista el
+    .json, el store del proyecto GANA (el onboarding lo crea AHÍ, no en home)."""
     (tmp_path / "CINE" / ".saman").mkdir(parents=True)
     monkeypatch.setenv("NUKE_PROFILES_PATH", "/ficticio/env/nuke_profiles.json")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -338,12 +338,13 @@ def test_store_proyecto_sin_archivo_cae_al_env(tmp_path, monkeypatch, sin_config
     )
     assert (
         injector.obtener_ruta_store(str(tmp_path / "CINE"))
-        == "/ficticio/env/nuke_profiles.json"
+        == str(tmp_path / "CINE" / ".saman" / "nuke_profiles.json")
     )
 
 
-def test_store_proyecto_mount_muerto_cae_al_env(tmp_path, monkeypatch, sin_config_local_real):
-    """R2/D6: mount desconectado -> probe False SIN colgar; cae al env var."""
+def test_store_proyecto_dirname_no_responde_cae_al_env(tmp_path, monkeypatch, sin_config_local_real):
+    """R2/D6: mount desconectado -> el probe de dirname falla SIN colgar;
+    cae al env var incluso con el .json presente."""
     raiz = tmp_path / "CINE"
     store = raiz / ".saman" / "nuke_profiles.json"
     store.parent.mkdir(parents=True)

@@ -525,6 +525,49 @@ def test_click_path_manager_importa_panel_y_abre_dialogo(menu_mod, fake_nuke, mo
     assert abiertos["n"] == 1
 
 
+def test_click_path_manager_pasa_store_del_proyecto_abierto(menu_mod, fake_nuke, monkeypatch):
+    """El click resuelve el store del proyecto ABIERTO (no el fallback home).
+
+    Req del usuario: si el .nk abierto esta bajo
+    ``/Volumes/estudio/2026/CINE/COMP/EP_.../xxx.nk``, el callback debe abrir el
+    panel con ``ruta_store={raiz}/.saman/nuke_profiles.json`` — no caer al home.
+    """
+    visto = {}
+
+    class _PanelFake:
+        @staticmethod
+        def abrir_dialogo(*args, **kwargs):
+            visto.update(kwargs)
+
+    paquete_ui = sys.modules.get("SamanTools.ui")
+    if paquete_ui is not None:
+        monkeypatch.setattr(paquete_ui, "path_manager_panel", _PanelFake, raising=False)
+    monkeypatch.setitem(sys.modules, "SamanTools.ui.path_manager_panel", _PanelFake)
+
+    # nuke.root().name() devuelve el archivo abierto bajo el proyecto
+    monkeypatch.setattr(
+        menu_mod.nuke,
+        "root",
+        lambda: type("_Root", (), {"name": staticmethod(lambda: "/Volumes/estudio/2026/CINE/COMP/EP_107/CINE_107_008_00100_V01.nk")})(),
+    )
+    # el dirname {raiz}/.saman responde (estado_unidad con timeout/cache)
+    from SamanTools.core import entorno as _entorno
+    monkeypatch.setattr(
+        _entorno, "estado_unidad", lambda r: {"conectado": True, "ruta": r}
+    )
+
+    menu_mod.instalar()
+    saman = fake_nuke._menus["Nuke"].findItem("SamanTools")
+    comando = saman.commands["Path Manager..."]["comando"]
+
+    comando()
+
+    assert "ruta_store" in visto
+    assert visto["ruta_store"].endswith("/.saman/nuke_profiles.json")
+    assert visto["ruta_store"].startswith("/Volumes/estudio/2026/CINE")
+    assert "/.config/saman/" not in visto["ruta_store"]
+
+
 def test_colision_atajo_usa_fallback_ctrl_alt_o(menu_mod, fake_nuke, monkeypatch):
     """REQ-3: "Ctrl+Alt+R" ocupado -> el item usa el fallback y el menu sigue.
 

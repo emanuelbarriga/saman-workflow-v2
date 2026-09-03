@@ -217,10 +217,24 @@ def _abrir_path_manager():
     PySide, ni al tope ni indentado — el guard regex de test_menu lo detecta
     con re.M). ``abrir_dialogo`` degrada en silencio sin sesion grafica, asi
     que el callback nunca lanza hacia arriba.
+
+    Resuelve el store del PROYECTO ABIERTO (contexto por corte estructural,
+    AD5: ``raiz_proyecto_desde_ruta`` + ``obtener_ruta_store(raiz)``) para que
+    el panel liste y edite los perfiles de ``{proyecto}/.saman/nuke_profiles.json``
+    — no los del fallback home. Sin archivo abierto (untitled) cae al fallback.
     """
     from SamanTools.ui import path_manager_panel
+    from SamanTools.ui import injector
+    from SamanTools.core import entorno
 
-    path_manager_panel.abrir_dialogo()
+    ruta_plato = ""
+    try:
+        ruta_plato = nuke.root().name() or ""
+    except Exception:
+        pass
+    raiz = entorno.raiz_proyecto_desde_ruta(ruta_plato) if ruta_plato else None
+    ruta_store = injector.obtener_ruta_store(raiz)
+    path_manager_panel.abrir_dialogo(ruta_store=ruta_store)
 
 
 def seleccionar_atajo(principal, fallback, ocupado):

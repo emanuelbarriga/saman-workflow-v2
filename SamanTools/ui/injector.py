@@ -192,6 +192,25 @@ def _probe_store(ruta):
     return os.path.isfile(str(ruta))
 
 
+def _probe_store_dir(directorio):
+    """Probe anti-hang del DIRNAME del store (AD6, sin exigir el archivo).
+
+    Usado por ``obtener_ruta_store`` cuando hay raiz de proyecto: el store del
+    proyecto debe GANAR aunque ``nuke_profiles.json`` aun no exista (el
+    onboarding lo crea ahi). Verifica que el directorio ``{raiz}/.saman``
+    responda (``estado_unidad`` con timeout y cache ~10s — un mount muerto no
+    cuelga). NO exige ``os.path.isfile``: ``estado_unidad`` solo hace ``ls -d``
+    y nunca crea el directorio en lectura (nace lazy en la primera escritura
+    del motor).
+    """
+    if not directorio:
+        return False
+    d = str(directorio).strip().rstrip("/\\")
+    if not d:
+        return False
+    return entorno.estado_unidad(d)["conectado"]
+
+
 def obtener_ruta_store(raiz_proyecto=None):
     """Resuelve la ruta del store de perfiles (spec load-injector S2, AD5).
 
@@ -208,7 +227,12 @@ def obtener_ruta_store(raiz_proyecto=None):
         raiz = str(raiz_proyecto).strip().rstrip("/\\")
         if raiz:
             ruta_proyecto = os.path.join(raiz, _RUTA_STORE_PROYECTO_REL)
-            if _probe_store(ruta_proyecto):
+            # El store del proyecto GANA aunque el .json no exista todavia:
+            # si el dirname ({raiz}/.saman) responde (anti-hang AD6), el panel
+            # debe apuntar aqui para que el onboarding LO CREE ahi — no caer
+            # al home. _probe_store verifica el dirname y solo usa isfile
+            # como confirmacion; un dirname conectado basta para elegirlo.
+            if _probe_store_dir(os.path.dirname(ruta_proyecto)):
                 return ruta_proyecto
     desde_env = os.environ.get("NUKE_PROFILES_PATH")
     if desde_env and str(desde_env).strip():
