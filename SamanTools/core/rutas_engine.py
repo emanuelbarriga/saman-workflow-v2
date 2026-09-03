@@ -28,6 +28,11 @@ uno tiene su root por plataforma.
   - ``asegurar_perfil(user, path, base=None)``: onboarding bajo el lock con
     re-read y re-deteccion (carrera ganada → perfil del ganador sin
     reescribir); si no, merge por usuario de la forma 3x3 y escritura atomica.
+  - ``eliminar_espacio_store(path, user, espacio)``: elimina SOLO la clave
+    ``espacio`` del usuario bajo lock (espejo de ``renombrar_perfil_store``:
+    re-read, guardas, pop de la clave target, ``_escribir_perfiles``); un
+    espacio AUSENTE es no-op byte-identico; usuario desconocido o espacio
+    canonico (D1, trio inmutable) → ``ValueError``.
   - ``relativizar``/``absolutizar`` (D5 two-track): relativizacion string-level
     ``[getenv PROJECT_ROOT]`` — la comparacion de prefijo se hace sobre una
     copia canonica case-folded (backslashes a slashes, strip, ``rstrip("/")``,
@@ -387,6 +392,34 @@ def renombrar_perfil_store(path, nombre_viejo, nombre_nuevo):
             raise ValueError(f"Ya existe un perfil llamado '{nombre_nuevo}'")
         perfil = store.pop(nombre_viejo)
         store[nombre_nuevo] = perfil
+        _escribir_perfiles(path, store)
+    return store
+
+
+def eliminar_espacio_store(path, user, espacio):
+    """Elimina UN espacio extra de un usuario bajo lock (READ-POP-WRITE atomico).
+
+    Espejo de ``renombrar_perfil_store``: bajo ``_lock_perfiles(path)`` RELEE
+    el store actual (D3: nunca decidir sobre una lectura previa), valida y
+    quita SOLO la clave ``espacio`` del usuario — NINGUN otro espacio, extra
+    ni usuario se toca. Un espacio AUSENTE es un no-op: se reescribe el store
+    tal cual (byte-identico si nada mas cambio). Guardas: usuario desconocido
+    (ausente en el envelope) → ``ValueError``; ``espacio`` canonico (D1: el
+    trio es inmutable) → ``ValueError`` ANTES del pop. Escribe con tmp +
+    ``os.replace`` y devuelve el dict interno ``perfiles`` resultado.
+    """
+    with _lock_perfiles(path):
+        store = leer_perfiles(path)
+        if user not in store:
+            raise ValueError(f"No existe el perfil '{user}' en el store")
+        if espacio in _ESPACIOS:
+            raise ValueError(
+                f"Los espacios canonicos {list(_ESPACIOS)} son inmutables: "
+                f"no se puede eliminar {espacio!r}"
+            )
+        perfil = store[user]
+        if espacio in perfil:
+            perfil.pop(espacio)
         _escribir_perfiles(path, store)
     return store
 
