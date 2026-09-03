@@ -38,6 +38,11 @@ onboarding D3 (TDD estricto):
   faltante → fallback hermano ``reconstruir_rutas(dirname, basename)`` sin
   slash final; clave irresoluble OMITIDA, nunca ``""`` (AD7); nunca muta
   ``os.environ``.
+* espacios-extra — ``eliminar_espacio_store`` (PR 2): elimina SOLO la clave
+  target del usuario bajo lock (read-pop-write atomico, espejo de
+  ``renombrar_perfil_store``); ausente → no-op byte-identico; usuario
+  desconocido → ``ValueError``; espacio canonico → ``ValueError`` (D1);
+  carrera real Barrier(2) con extras distintos del mismo usuario.
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026/CINE/...``,
 ``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``); ninguna ruta real
@@ -875,3 +880,108 @@ def test_env_extra_no_es_marcador_de_corte_estructural():
     env = rutas_engine.variables_entorno(ctx, perfil=perfil)
     assert env["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE"
     assert env["PYTHON_3D"] == "/Volumes/estudio/2026/CINE/3D"
+
+
+# --- espacios-extra: eliminar_espacio_store (PR 2, D1/D3) --------------------
+
+
+def _bytes_store(ruta):
+    """Snapshot byte-identical del store (verifica un no-op REAL)."""
+    with open(ruta, "rb") as f:
+        return f.read()
+
+
+def _perfil_con_extra(extra, raiz_extra):
+    """Perfil 3x3 + UN extra con raiz macOS (para eliminar_espacio_store)."""
+    perfil = _perfil_por_defecto()
+    perfil[extra] = {"macOS": raiz_extra}
+    return perfil
+
+
+def test_eliminar_espacio_store_quita_solo_la_clave_target(tmp_path):
+    """spec: ana conserva canonicos + PREVIEW, '3D' desaparece y pedro intacto."""
+    ruta = str(tmp_path / "nuke_profiles.json")
+    ana = _perfil_con_extra("3D", "/Volumes/estudio/2026/CINE/3D")
+    ana["PREVIEW"] = {"macOS": "/Volumes/estudio/2026/CINE/PREVIEW"}
+    rutas_engine.guardar_perfiles(ruta, {"ana": ana, "pedro": _perfil_por_defecto()})
+    store = rutas_engine.eliminar_espacio_store(ruta, "ana", "3D")
+    assert "3D" not in store["ana"]
+    assert store["ana"]["PREVIEW"] == ana["PREVIEW"]
+    assert store["ana"]["TO_VFX"] == _perfil_por_defecto()["TO_VFX"]
+    assert store["ana"]["COMP"] == _perfil_por_defecto()["COMP"]
+    assert store["ana"]["FROM_VFX"] == _perfil_por_defecto()["FROM_VFX"]
+    assert store["pedro"] == _perfil_por_defecto()
+    # Persistio de verdad: releido del archivo, no solo en memoria.
+    assert rutas_engine.leer_perfiles(ruta) == store
+
+
+def test_eliminar_espacio_store_ausente_es_noop_byte_identico(tmp_path):
+    """spec: ana sin 'PREVIEW' → sin error, store sin cambios y bytes identicos."""
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"ana": _perfil_por_defecto()})
+    antes = _bytes_store(ruta)
+    store = rutas_engine.eliminar_espacio_store(ruta, "ana", "PREVIEW")
+    assert store == rutas_engine.leer_perfiles(ruta) == {"ana": _perfil_por_defecto()}
+    assert _bytes_store(ruta) == antes  # byte-identical: no-op real
+
+
+def test_eliminar_espacio_store_usuario_desconocido_lanza_valueerror(tmp_path):
+    """spec: user ausente en el envelope → ValueError y el store NO se toca."""
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"ana": _perfil_por_defecto()})
+    antes = _bytes_store(ruta)
+    with pytest.raises(ValueError, match="No existe el perfil"):
+        rutas_engine.eliminar_espacio_store(ruta, "nadie", "3D")
+    assert _bytes_store(ruta) == antes  # nada se escribio
+
+
+@pytest.mark.parametrize("espacio", ["TO_VFX", "COMP", "FROM_VFX"])
+def test_eliminar_espacio_store_canonico_lanza_valueerror(tmp_path, espacio):
+    """D1: el trio canonico es inmutable → ValueError y el store NO se toca."""
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"ana": _perfil_por_defecto()})
+    antes = _bytes_store(ruta)
+    with pytest.raises(ValueError, match="canonico"):
+        rutas_engine.eliminar_espacio_store(ruta, "ana", espacio)
+    assert _bytes_store(ruta) == antes
+
+
+def _worker_eliminar_espacio(ruta, usuario, espacio, bar):
+    """Worker de proceso: espera la barrera y elimina UN extra bajo lock."""
+    bar.wait()
+    rutas_engine.eliminar_espacio_store(ruta, usuario, espacio)
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="el lock POSIX (requisito de este test) no existe en Windows",
+)
+def test_eliminar_espacio_concurrente_extras_distintos_mismo_usuario(tmp_path):
+    """Race: dos procesos eliminan '3D' y 'PREVIEW' de ana; sin lost update.
+
+    Espejo de test_guardar_concurrente_multiproceso_no_pierde_perfiles:
+    Barrier(2), cada worker elimina SU extra bajo el lock dir atomico; el
+    store final queda SIN ninguno de los dos extras y con los canonicos
+    intactos (spec: "concurrent removals of different keys both persist").
+    """
+    ruta = str(tmp_path / "nuke_profiles.json")
+    perfil = _perfil_con_extra("3D", "/Volumes/estudio/2026/CINE/3D")
+    perfil["PREVIEW"] = {"macOS": "/Volumes/estudio/2026/CINE/PREVIEW"}
+    rutas_engine.guardar_perfiles(ruta, {"ana": perfil})
+    ctx = multiprocessing.get_context()
+    bar = ctx.Barrier(2)
+    p1 = ctx.Process(target=_worker_eliminar_espacio, args=(ruta, "ana", "3D", bar))
+    p2 = ctx.Process(target=_worker_eliminar_espacio, args=(ruta, "ana", "PREVIEW", bar))
+    p1.start()
+    p2.start()
+    p1.join(45)
+    p2.join(45)
+    assert p1.exitcode == 0, f"worker 3D fallo (exitcode {p1.exitcode})"
+    assert p2.exitcode == 0, f"worker PREVIEW fallo (exitcode {p2.exitcode})"
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["ana"] == _perfil_por_defecto()  # sin 3D ni PREVIEW; canonicos viven
+    assert "3D" not in store["ana"]
+    assert "PREVIEW" not in store["ana"]
+    # Sin temporales ni lockdir residual: solo queda el store (D6-v2).
+    nombres = sorted(p.name for p in tmp_path.iterdir())
+    assert nombres == ["nuke_profiles.json"]
