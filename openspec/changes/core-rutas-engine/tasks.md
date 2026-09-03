@@ -74,9 +74,9 @@ both together), so slices stay per-module/per-concern.
 
 ## Group G5 — Engine: profile store + lock (Phase 2; PR 5)
 
-- [ ] 5.1 RED: extend `tests/test_rutas_engine.py` (store+lock slice): missing file → `{}`; malformed → `ValueError`; atomic round-trip no temp leftovers; concurrent `guardar_perfiles` (`ana`/`ws1` + `pedro`/`ws2`) both persist via multiprocessing with start barrier on POSIX; lock exhausted → `TimeoutError`; `_lock_clase(plataforma)` factory covers fcntl/msvcrt/no-op branches.
-- [ ] 5.2 GREEN: `core/rutas_engine.py` — `leer_perfiles` (returns inner `perfiles` dict, D1), `guardar_perfiles` (wraps envelope, preserves unknown top-level keys, per-user merge — never blind replace, D1/D3), `crear_perfil_default(base)` (fictitious roots; base-shape slotting `/Volumes/`→macOS, `^[A-Za-z]:`→Windows, `/mnt/`→Linux, else all three), `_lock_perfiles(path)` context manager (sibling `path + ".lock"`, NEVER the os.replace target, D6).
-- [ ] 5.3 Iterate to green; `py_compile`. (No real paths — store roots fictitious.)
+- [x] 5.1 RED: extend `tests/test_rutas_engine.py` (store+lock slice): missing file → `{}`; malformed → `ValueError`; atomic round-trip no temp leftovers; concurrent `guardar_perfiles` (`ana`/`ws1` + `pedro`/`ws2`) both persist via multiprocessing with start barrier on POSIX; lock exhausted → `TimeoutError`; `_lock_clase(plataforma)` factory covers fcntl/msvcrt/no-op branches.
+- [x] 5.2 GREEN: `core/rutas_engine.py` — `leer_perfiles` (returns inner `perfiles` dict, D1), `guardar_perfiles` (wraps envelope, preserves unknown top-level keys, per-user merge — never blind replace, D1/D3), `crear_perfil_default(base)` (fictitious roots; base-shape slotting `/Volumes/`→macOS, `^[A-Za-z]:`→Windows, `/mnt/`→Linux, else all three), `_lock_perfiles(path)` context manager (sibling `path + ".lock"`, NEVER the os.replace target, D6).
+- [x] 5.3 Iterate to green; `py_compile`. (No real paths — store roots fictitious.)
 
 ## Group G6 — Engine: resolution + onboarding (Phase 2; PR 6)
 
