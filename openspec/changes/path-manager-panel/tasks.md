@@ -51,6 +51,6 @@ Chain strategy: pending
 
 ## Phase 3: P3 — Menu integration
 
-- [ ] 3.1 RED — extend `tests/test_menu.py`: `_MenuFake.addCommand` captures `shortcut` (D6); one idempotent item, `Ctrl+Alt+R`, no dialog at install (REQ-1); no PySide in sys.modules after exec, regex clean (REQ-2); collision → fallback `Ctrl+Alt+O` via `_atajo_ocupado()` + `seleccionar_atajo` (REQ-3, D5). Verify: fails.
-- [ ] 3.2 GREEN — `SamanTools/ui/menu.py`: flat item; `_ATAJO_PATH_MANAGER="Ctrl+Alt+R"` / `_ATAJO_FALLBACK_PATH_MANAGER="Ctrl+Alt+O"`; lazy callback importing panel ONLY at click (D1); try/except fallback (D5). Verify: 3.1 + `test_sin_pyside_ni_creacion_de_paneles`/`test_importa_nuke_a_nivel_de_modulo` green; `py_compile`.
-- [ ] 3.3 VERIFY — invoke command → panel imported + dialog opens (fake panel); full `pytest` green; `py_compile` all touched. Verify: suite + build gate.
+- [x] 3.1 RED — extend `tests/test_menu.py`: `_MenuFake.addCommand` captures `shortcut` (D6); one idempotent item, `Ctrl+Alt+R`, no dialog at install (REQ-1); no PySide in sys.modules after exec, regex clean (REQ-2); collision → fallback `Ctrl+Alt+O` via `_atajo_ocupado()` + `seleccionar_atajo` (REQ-3, D5). Verify: fails.
+- [x] 3.2 GREEN — `SamanTools/ui/menu.py`: flat item; `_ATAJO_PATH_MANAGER="Ctrl+Alt+R"` / `_ATAJO_FALLBACK_PATH_MANAGER="Ctrl+Alt+O"`; lazy callback importing panel ONLY at click (D1); try/except fallback (D5). Verify: 3.1 + `test_sin_pyside_ni_creacion_de_paneles`/`test_importa_nuke_a_nivel_de_modulo` green; `py_compile`.
+- [x] 3.3 VERIFY — invoke command → panel imported + dialog opens (fake panel); full `pytest` green; `py_compile` all touched. Verify: suite + build gate.

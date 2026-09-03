@@ -94,9 +94,9 @@ class _MenuFake:
             self.submenus[nombre] = _MenuFake(nombre)
         return self.submenus[nombre]
 
-    def addCommand(self, nombre, comando):
+    def addCommand(self, nombre, comando, shortcut=None):
         if nombre not in self.commands:
-            self.commands[nombre] = {"comando": comando, "veces": 0}
+            self.commands[nombre] = {"comando": comando, "veces": 0, "shortcut": shortcut}
         self.commands[nombre]["veces"] += 1
 
 
@@ -407,3 +407,95 @@ def test_item_version_anuncia_version_del_paquete(menu_mod, fake_nuke):
     ultimo = fake_nuke.mensajes[-1]
     assert "SamanTools V2" in ultimo
     assert "2.0.0" in ultimo
+
+
+# ---------------------------------------------------------------------------
+# P3 (3.1): item Path Manager en el menu SamanTools (REQ-1/REQ-2/REQ-3, D1/D5)
+# ---------------------------------------------------------------------------
+# REQ-1: registra el item, idempotente, sin abrir dialogo al instalar.
+# REQ-2: nunca importa PySide a nivel de modulo (guard regex + sys.modules).
+# REQ-3: colision del atajo -> fallback Ctrl+Alt+O sin romper el build (D5).
+
+
+def test_instalar_registra_item_path_manager_sin_duplicar(menu_mod, fake_nuke):
+    """REQ-1: dos installs -> UN item "Path Manager..." con Ctrl+Alt+R."""
+    assert menu_mod.instalar() is True
+    menu_mod.instalar()
+
+    saman = fake_nuke._menus["Nuke"].findItem("SamanTools")
+    item = saman.commands["Path Manager..."]
+    assert item["veces"] == 1
+    assert item["shortcut"] == menu_mod._ATAJO_PATH_MANAGER
+    assert item["shortcut"] == "Ctrl+Alt+R"
+
+
+def test_instalar_no_abre_dialogo_ni_importa_pyside(fake_nuke):
+    """REQ-1/REQ-2: instalar dos veces no abre dialogo ni trae PySide."""
+    antes = {k for k in sys.modules if k.startswith("PySide")}
+    _ejecutar_como_bootstrap()
+    _ejecutar_como_bootstrap()
+    despues = {k for k in sys.modules if k.startswith("PySide")}
+
+    assert despues == antes
+    saman = fake_nuke._menus["Nuke"].findItem("SamanTools")
+    assert saman.commands["Path Manager..."]["veces"] == 1
+
+
+def test_click_path_manager_importa_panel_y_abre_dialogo(menu_mod, fake_nuke, monkeypatch):
+    """REQ-2: el click importa el panel recien ahi y abre el dialogo (fake)."""
+    abiertos = {"n": 0}
+
+    class _PanelFake:
+        @staticmethod
+        def abrir_dialogo(*args, **kwargs):
+            abiertos["n"] += 1
+
+    paquete_ui = sys.modules.get("SamanTools.ui")
+    if paquete_ui is not None:
+        monkeypatch.setattr(paquete_ui, "path_manager_panel", _PanelFake, raising=False)
+    monkeypatch.setitem(sys.modules, "SamanTools.ui.path_manager_panel", _PanelFake)
+
+    menu_mod.instalar()
+    saman = fake_nuke._menus["Nuke"].findItem("SamanTools")
+    comando = saman.commands["Path Manager..."]["comando"]
+
+    comando()  # el "click" del usuario en el menu
+
+    assert abiertos["n"] == 1
+
+
+def test_colision_atajo_usa_fallback_ctrl_alt_o(menu_mod, fake_nuke, monkeypatch):
+    """REQ-3: "Ctrl+Alt+R" ocupado -> el item usa el fallback y el menu sigue.
+
+    El import del modulo ya registro el item con el predicado real (optimista):
+    se simula la colision expulsando ese registro (sin item previo en la
+    sesion) y re-ejecutando el build con el predicado inyectado — patcheado a
+    True para el atajo principal (D5).
+    """
+    monkeypatch.setattr(
+        menu_mod, "_atajo_ocupado", lambda atajo: atajo == "Ctrl+Alt+R"
+    )
+    saman = fake_nuke._menus["Nuke"].findItem("SamanTools")
+    del saman.commands["Path Manager..."]  # sesion sin registro previo del item
+
+    assert menu_mod.instalar() is True
+
+    item = saman.commands["Path Manager..."]
+    assert item["shortcut"] == menu_mod._ATAJO_FALLBACK_PATH_MANAGER
+    assert item["shortcut"] == "Ctrl+Alt+O"
+
+
+def test_seleccionar_atajo_mantiene_principal_si_libre(menu_mod):
+    """D5: predicado False -> se mantiene el atajo principal."""
+    assert (
+        menu_mod.seleccionar_atajo("Ctrl+Alt+R", "Ctrl+Alt+O", lambda a: False)
+        == "Ctrl+Alt+R"
+    )
+
+
+def test_seleccionar_atajo_degrade_al_fallback_si_ocupado(menu_mod):
+    """D5: predicado True -> triangulacion: degrada al fallback."""
+    assert (
+        menu_mod.seleccionar_atajo("Ctrl+Alt+R", "Ctrl+Alt+O", lambda a: True)
+        == "Ctrl+Alt+O"
+    )

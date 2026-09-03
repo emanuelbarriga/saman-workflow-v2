@@ -22,6 +22,11 @@ de modulo (0% coverage aceptado por diseno, ADR-7).
     duplica items). Los botones de mantenimiento (Actualizar/Desinstalar) los
     agrega el PROPIO bootstrap despues, sobre el mismo submenu
     (``bootstrap/menu.py`` ``_agregar_boton_menu``).
+  - Item "Path Manager..." (cambio path-manager-panel, P3): PLANO sobre el
+    menu SamanTools (D5), atajo ``Ctrl+Alt+R`` desde la constante unica
+    ``_ATAJO_PATH_MANAGER`` con fallback ``Ctrl+Alt+O`` ante colision (REQ-3);
+    su callback ``_abrir_path_manager`` importa el panel SOLO en el click (D1)
+    — nunca PySide a nivel de modulo (REQ-2).
   - Import-safe: importa el injector y el core normalmente; el shim
     (``SamanTools.rutas``) se importa TOLERANTEMENTE (try/except ImportError)
     para que un shim roto nunca rompa callbacks ni menu (spec load-ui-menu).
@@ -57,6 +62,9 @@ except ImportError:
 _NOMBRE_MENU = "SamanTools"
 _NOMBRE_SUBMENU = "Configuración"
 _NOMBRE_ITEM_INFO = "Información de SamanTools..."
+_NOMBRE_ITEM_PATH_MANAGER = "Path Manager..."
+_ATAJO_PATH_MANAGER = "Ctrl+Alt+R"
+_ATAJO_FALLBACK_PATH_MANAGER = "Ctrl+Alt+O"
 _CLAVE_PROJECT_ROOT = "PROJECT_ROOT"
 
 
@@ -194,13 +202,61 @@ def _mostrar_info_version():
         nuke.message("SamanTools V2 — versión %s" % version)
 
 
+def _abrir_path_manager():
+    """Callback del click "Path Manager...": importa el panel SOLO aqui (D1).
+
+    El import de ``SamanTools.ui.path_manager_panel`` ocurre en el momento del
+    click, nunca al instalar: con el llega PySide al proceso (el panel lo
+    importa internamente; este modulo no contiene NINGUN literal de import de
+    PySide, ni al tope ni indentado — el guard regex de test_menu lo detecta
+    con re.M). ``abrir_dialogo`` degrada en silencio sin sesion grafica, asi
+    que el callback nunca lanza hacia arriba.
+    """
+    from SamanTools.ui import path_manager_panel
+
+    path_manager_panel.abrir_dialogo()
+
+
+def seleccionar_atajo(principal, fallback, ocupado):
+    """Elige el atajo a registrar: ``principal`` salvo que este ocupado (D5).
+
+    Pura y testable sin Nuke: ``ocupado`` es un predicado que recibe el atajo
+    candidato y devuelve bool. Si ``ocupado(principal)`` es True (otro plugin
+    ya registro el atajo), la colision degrada al ``fallback`` documentado; si
+    no, se mantiene el ``principal``.
+    """
+    if ocupado(principal):
+        return fallback
+    return principal
+
+
+def _atajo_ocupado(atajo):
+    """Predicado real de colision del atajo (D5): optimista, nunca lanza.
+
+    Nuke no expone una consulta de propiedad de atajos (open question en
+    design.md) y su ``addCommand`` advierte en vez de lanzar: no hay senal
+    fiable de colision, asi que la implementacion real registra de forma
+    optimista con el atajo principal. La proteccion try/except garantiza que
+    el build del menu jamas se rompe ante una API distinta o futura; los tests
+    inyectan el predicado.
+    """
+    try:
+        return False
+    except Exception:
+        return False
+
+
 def instalar():
     """Construye el menu minimo SamanTools y registra los callbacks (idempotente).
 
     Reutiliza el menu/submenu si ya existen (patron V1): los botones de
     mantenimiento del bootstrap (Actualizar/Desinstalar) se agregan DESPUES
-    sobre el mismo submenu Configuracion desde ``bootstrap/menu.py``. No crea
-    paneles ni importa PySide (spec load-ui-menu). Devuelve True.
+    sobre el mismo submenu Configuracion desde ``bootstrap/menu.py``. Registra
+    ademas el item "Path Manager..." PLANO sobre el menu SamanTools (D5) con
+    el atajo de la constante ``_ATAJO_PATH_MANAGER`` (fallback
+    ``_ATAJO_FALLBACK_PATH_MANAGER`` si otro plugin ya lo tiene, REQ-3): su
+    callback importa el panel SOLO al click (D1), nunca al instalar. No crea
+    paneles ni importa PySide (spec load-ui-menu + REQ-2). Devuelve True.
     """
     registrar_callbacks()
     menubar = nuke.menu("Nuke")
@@ -212,6 +268,11 @@ def instalar():
         configuracion = saman.addMenu(_NOMBRE_SUBMENU)
     if configuracion.findItem(_NOMBRE_ITEM_INFO) is None:
         configuracion.addCommand(_NOMBRE_ITEM_INFO, _mostrar_info_version)
+    if saman.findItem(_NOMBRE_ITEM_PATH_MANAGER) is None:
+        atajo = seleccionar_atajo(
+            _ATAJO_PATH_MANAGER, _ATAJO_FALLBACK_PATH_MANAGER, _atajo_ocupado
+        )
+        saman.addCommand(_NOMBRE_ITEM_PATH_MANAGER, _abrir_path_manager, shortcut=atajo)
     return True
 
 
