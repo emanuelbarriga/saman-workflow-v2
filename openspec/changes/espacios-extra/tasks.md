@@ -55,9 +55,9 @@ Scope: engine + helper + widget + tests only; injector/menu/shim untouched (no n
 
 ## Phase 4: Widget (PR 4)
 
-- [ ] 4.1 RED: rows render name+root+semaforo; OS switch → disconnected/back; add persists + env via `_spy_aplicar_env` (:203); invalid `hosts` → nuke.message, no write; `[-]` removes + env; `:537-540` + toggle (:501-522) untouched
-- [ ] 4.2 GREEN: `self.grupo_extras` after `grupo_avanzado` (:263): rows `[name][path][Buscar][OK][-]`, per-row OS combo (D2), add-row validated name (D8), `[+ Agregar]`, OS label; semaphores via `estado_unidad`
-- [ ] 4.3 GREEN: wire `_alternar_avanzado` + OK/add/`[-]` to helpers; env only via `cachear_env`+`aplicar_entorno`; canonical section (:229-263) byte-identical
+- [x] 4.1 RED: rows render name+root+semaforo; OS switch → disconnected/back; add persists + env via `_spy_aplicar_env` (:203); invalid `hosts` → nuke.message, no write; `[-]` removes + env; `:537-540` + toggle (:501-522) untouched
+- [x] 4.2 GREEN: `self.grupo_extras` after `grupo_avanzado` (:263): rows `[name][path][Buscar][OK][-]`, per-row OS combo (D2), add-row validated name (D8), `[+ Agregar]`, OS label; semaphores via `estado_unidad`
+- [x] 4.3 GREEN: wire `_alternar_avanzado` + OK/add/`[-]` to helpers; env only via `cachear_env`+`aplicar_entorno`; canonical section (:229-263) byte-identical
 
 ## Phase 5: Agreement + injector (PR 5)
 
