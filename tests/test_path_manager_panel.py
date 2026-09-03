@@ -1,29 +1,28 @@
-"""Tests del dialogo fino del Path Manager — contrato usuario-solo (S1).
+"""Tests del dialogo Path Manager — slice S4 (widget combo + apply-on-select).
 
-Cubre el widget ``SamanTools/ui/path_manager_panel.py`` (TDD estricto, pytest-qt)
-con el esquema 3x3 de perfil-por-usuario (AD2): el dialogo trabaja con el
-usuario, sin hostname.
+Cubre el widget ``SamanTools/ui/path_manager_panel.py`` (TDD estricto,
+pytest-qt) sobre el contrato usuario-solo de perfil-por-usuario (AD2): el
+dialogo consume DATOS del helper (estado, unidad, LISTA de perfiles) y NUNCA
+computa perfiles ni escribe el entorno por su cuenta.
 
-* REQ-1 (escenario "profile and status rendered from helper data") — el dialogo
-  con un perfil conocido renderiza la raiz ficticia del SO actual y el estado
-  de unidad conectado, sin mutar ``os.environ``.
-* REQ-4 (escenario "snapshot unchanged on cancel") — abrir, renderizar y
-  cancelar (Cerrar) deja ``os.environ`` intacto; ademas el codigo del widget
-  NO muta ``os.environ`` por su cuenta: la propagacion del env pasa SOLO por
-  ``injector.cachear_env`` + ``injector.aplicar_entorno``.
+* REQ-1 (escenario "profile and status rendered from helper data") — el
+  dialogo con un perfil conocido renderiza la raiz ficticia del SO actual, el
+  estado de unidad conectado y el combo de perfiles, sin mutar ``os.environ``.
+* Combo (ADDED "Profile selector combo") — rellenado al abrir
+  (``listar_perfiles`` via ``abrir_dialogo``), preseleccion del usuario, store
+  vacio -> combo vacio + onboarding; seleccion -> env + refresco de Reads;
+  ``ValueError`` stale sin env parcial; flag legacy -> aviso de regeneracion.
 * REQ-2 (escenario "new user submits base and env propagates") — el submit del
   onboarding llama UNA vez a ``asegurar_perfil`` con la base del formulario y
-  aplica el env devuelto via injector; ``os.environ["PROJECT_ROOT"]`` queda en
-  la base ficticia.
-* REQ-3 (escenario "change base re-applies env") — el cambio de base persiste
-  via helper y re-aplica el env a la base 2027 via injector.
+  aplica el env devuelto via injector.
+* REQ-3 (escenario "change base re-applies env") — el cambio de base por
+  ESPACIO (S4) persiste via helper la raiz del slot (espacio, so) y re-aplica
+  el env via injector; otras raices intactas.
 * REQ-5 (escenarios "no GUI degrades silently") — ``abrir_dialogo()`` sin
-  sesion grafica (``nuke.GUI`` falso) o sin PySide disponible degrada en
-  silencio: nunca lanza y no crea ventana.
+  sesion grafica o sin PySide degrada en silencio.
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026/CINE/...``,
-``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``); ninguna ruta real
-del estudio aparece en fixtures.
+``L:/VFX/2026/CINE/...``, ``/mnt/estudio/2026/CINE/...``).
 """
 
 import json
@@ -42,7 +41,7 @@ from SamanTools.ui import injector  # noqa: E402
 from SamanTools.ui import path_manager  # noqa: E402
 from SamanTools.ui import path_manager_panel  # noqa: E402
 
-_ROOTS = {
+_ROOT_2026 = {
     "TO_VFX": {
         "macOS": "/Volumes/estudio/2026/CINE/TO_VFX",
         "Windows": "L:/VFX/2026/CINE/TO_VFX",
@@ -60,15 +59,32 @@ _ROOTS = {
     },
 }
 
+# Raices del 2027 para triangular el apply-on-select (perfil distinto -> env
+# distinto y cambio de proyecto en los Reads).
+_ROOT_2027 = {
+    "TO_VFX": {
+        "macOS": "/Volumes/estudio/2027/CINE2/TO_VFX",
+        "Windows": "L:/VFX/2027/CINE2/TO_VFX",
+        "Linux": "/mnt/estudio/2027/CINE2/TO_VFX",
+    },
+    "COMP": {
+        "macOS": "/Volumes/estudio/2027/CINE2/COMP",
+        "Windows": "L:/VFX/2027/CINE2/COMP",
+        "Linux": "/mnt/estudio/2027/CINE2/COMP",
+    },
+    "FROM_VFX": {
+        "macOS": "/Volumes/estudio/2027/CINE2/FROM_VFX",
+        "Windows": "L:/VFX/2027/CINE2/FROM_VFX",
+        "Linux": "/mnt/estudio/2027/CINE2/FROM_VFX",
+    },
+}
+
+_LEGACY = {"hosts": {"ws1": _ROOT_2026["COMP"]}, "default": _ROOT_2026["COMP"]}
+
 
 @pytest.fixture(autouse=True)
 def _restaurar_estado(monkeypatch):
-    """Aisla cada test: entorno, ``__main__`` e inyector sin efectos residuales.
-
-    Los tests de submit aplican env real (``injector.aplicar_entorno``) que
-    muta ``os.environ`` y ``__main__``; esta fixture restaura ambos y el cache
-    del injector para no contaminar el resto de la suite.
-    """
+    """Aisla cada test: entorno, ``__main__`` e inyector sin efectos residuales."""
     import __main__
 
     env_antes = dict(os.environ)
@@ -88,14 +104,64 @@ def _restaurar_estado(monkeypatch):
 
 
 class _NukeFake:
-    """Modulo nuke fake minimo: GUI + message con grabacion (patron test_bootstrap)."""
+    """Modulo nuke fake minimo: GUI + message con grabacion."""
 
-    def __init__(self, gui=True):
+    def __init__(self, gui=True, reads=None):
         self.GUI = gui
         self.messages = []
+        self.reads = reads or []
 
     def message(self, texto):
         self.messages.append(texto)
+
+    def allNodes(self, tipo):
+        if tipo == "Read":
+            return list(self.reads)
+        return []
+
+
+class _NodoReadFake:
+    """Nodo Read fake: el knob file re-evalua ``[getenv X]`` contra os.environ.
+
+    Modela el comportamiento real de Nuke: ``fromScript`` re-evalua los tokens
+    TCL ``[getenv ...]`` con el entorno ACTUAL, asi un cambio de env cambia la
+    ruta resuelta y el widget debe recargar el nodo.
+    """
+
+    def __init__(self, nombre, script, valor):
+        self.nombre = nombre
+        self._script = script
+        self._valor = valor
+        self.reloads = 0
+        self._tabla = {"file": self, "reload": self}
+
+    def knobs(self):
+        return self._tabla
+
+    def __getitem__(self, nombre):
+        return self._tabla[nombre]
+
+    def toScript(self):
+        return self._script
+
+    def value(self):
+        return self._valor
+
+    def fromScript(self, script):
+        self._script = script
+        self._valor = self._evaluar(script)
+
+    def execute(self):
+        self.reloads += 1
+
+    @staticmethod
+    def _evaluar(script):
+        import re
+
+        def _sust(m):
+            return os.environ.get(m.group(1), "")
+
+        return re.sub(r"\[getenv ([A-Za-z_]+)\]", _sust, script)
 
 
 def _escribir_store(tmp_path, perfiles):
@@ -112,12 +178,16 @@ def _marcar_conectado(base):
     return {"conectado": True, "ruta": base, "detalle": "Conectado."}
 
 
+def _items_combo(combo):
+    """Items de un QComboBox como lista de strings."""
+    return [combo.itemText(i) for i in range(combo.count())]
+
+
 def _spy_aplicar_env(monkeypatch):
     """Envuelve ``cachear_env``/``aplicar_entorno`` grabando los dicts recibidos.
 
-    Devuelve ``(ruta_cache, ruta_aplicados)``; las listas guardan COPY del env
-    recibido. Los wrappers delegan en la implementacion real para que
-    ``os.environ`` y el cache del injector sigan funcionando.
+    Los wrappers delegan en la implementacion real para que ``os.environ`` y
+    el cache del injector sigan funcionando.
     """
     cacheados = []
     aplicados = []
@@ -138,31 +208,37 @@ def _spy_aplicar_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# REQ-1 (2.1): render de datos del helper + environment intacto
+# REQ-1: render de datos del helper + environment intacto + combo presente
 # ---------------------------------------------------------------------------
 
 
-def test_dialogo_conocido_muestra_raiz_y_estado(qtbot, monkeypatch, tmp_path):
+def test_dialogo_conocido_muestra_raiz_estado_y_combo(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
     env_antes = dict(os.environ)
 
     estado = path_manager.estado_panel(ruta, "ana", "macOS")
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS", perfiles=["ana", "pedro"]
+    )
     qtbot.addWidget(dialogo)
 
     assert dialogo.label_perfil.text() == "Raiz actual: /Volumes/estudio/2026/CINE/TO_VFX"
     assert dialogo.label_unidad.text() == "Unidad: Conectado."
+    assert _items_combo(dialogo.combo_perfiles) == ["ana", "pedro"]
+    assert dialogo.combo_perfiles.currentText() == "ana"
     assert dict(os.environ) == env_antes
 
 
 def test_dialogo_abrir_y_cancelar_no_muta_env(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026})
     estado = path_manager.estado_panel(ruta, "ana", "macOS")
     env_antes = dict(os.environ)
 
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS", perfiles=["ana"]
+    )
     qtbot.addWidget(dialogo)
 
     dialogo.boton_cerrar.click()  # cancelar sin submit
@@ -180,13 +256,167 @@ def test_panel_env_solo_via_injector():
 
 
 # ---------------------------------------------------------------------------
-# REQ-2 (2.3): onboarding -> asegurar_perfil una vez + env aplicado
+# Combo S4: store vacio -> combo vacio + onboarding; refresh en cada open
+# ---------------------------------------------------------------------------
+
+
+def test_combo_vacio_con_store_vacio_muestra_onboarding(qtbot, monkeypatch, tmp_path):
+    """Spec S4: store vacio -> combo vacio mas el formulario de onboarding."""
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {})
+
+    estado = path_manager.estado_panel(ruta, "nuevo", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "nuevo", ruta, "macOS", perfiles=[]
+    )
+    qtbot.addWidget(dialogo)
+
+    assert dialogo.combo_perfiles.count() == 0
+    assert dialogo.label_perfil.text() == "Onboarding: defina la base del proyecto"
+    assert dialogo.boton_onboarding is not None
+
+
+def test_abrir_dialogo_refresca_lista_perfiles_al_abrir(monkeypatch, tmp_path):
+    """Spec S4 escenario "open refreshes the profile list".
+
+    ``abrir_dialogo`` relee el store en CADA open: si el store gano un usuario
+    entre aperturas, el combo lo lista la siguiente vez.
+    """
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026})
+    fake = _NukeFake(gui=True)
+    construidos = []
+
+    class _Registro:
+        def __init__(self, estado, usuario, ruta_store, so, perfiles=None, parent=None):
+            construidos.append(list(perfiles or []))
+            self._user = usuario
+
+        def exec(self):
+            pass
+
+    monkeypatch.setattr(path_manager_panel, "PathManagerDialog", _Registro)
+    monkeypatch.setattr(path_manager_panel, "nuke", fake)
+
+    path_manager_panel.abrir_dialogo(
+        nuke_mod=fake, usuario="ana", ruta_store=ruta, so="macOS"
+    )
+    assert construidos == [["ana"]]
+
+    _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2026})
+    path_manager_panel.abrir_dialogo(
+        nuke_mod=fake, usuario="ana", ruta_store=ruta, so="macOS"
+    )
+    assert construidos == [["ana"], ["ana", "pedro"]]
+
+
+# ---------------------------------------------------------------------------
+# Combo S4: apply-on-select -> env + refresco de Reads
+# ---------------------------------------------------------------------------
+
+
+def test_seleccion_aplica_env_y_refresca_reads(qtbot, monkeypatch, tmp_path):
+    """Spec S4 escenario "selecting a profile applies env and refreshes Reads".
+
+    Seleccionar ``pedro`` (raices 2027) aplica su env (PROJECT_ROOT cambia) y
+    refresca los Reads: el Read dinamico ``[getenv PROJECT_ROOT]`` recarga por
+    cambio de ruta resuelta y el Read estatico NO se toca.
+    """
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026, "pedro": _ROOT_2027})
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+
+    read_getenv = _NodoReadFake(
+        "read_getenv",
+        "[getenv PROJECT_ROOT]/COMP/plate.%04d.exr",
+        "/Volumes/estudio/2026/CINE/TO_VFX/COMP/plate.0001.exr",
+    )
+    read_estatico = _NodoReadFake(
+        "read_estatico",
+        "/Volumes/estudio/2026/CINE/STATIC/plate.exr",
+        "/Volumes/estudio/2026/CINE/STATIC/plate.exr",
+    )
+    fake_nuke = _NukeFake(gui=True, reads=[read_getenv, read_estatico])
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS", perfiles=["ana", "pedro"]
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.combo_perfiles.setCurrentIndex(1)  # el artista selecciona "pedro"
+
+    assert aplicados[-1]["PROJECT_ROOT"] == "/Volumes/estudio/2027/CINE2/TO_VFX"
+    assert aplicados[-1]["PYTHON_COMP"] == "/Volumes/estudio/2027/CINE2/COMP"
+    assert cacheados[-1] == aplicados[-1]
+    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2027/CINE2/TO_VFX"
+    assert fake_nuke.messages, "la seleccion informa al artista via nuke.message"
+    assert read_getenv.reloads == 1, "el Read dinamico recarga por cambio de ruta"
+    assert read_estatico.reloads == 0, "el Read estatico no cambia de ruta: sin reload"
+
+
+def test_seleccion_stale_valueerror_no_aplica_env_parcial(qtbot, monkeypatch, tmp_path):
+    """Spec S4 escenario "stale selection is surfaced without partial env".
+
+    El combo lista ``ana`` (captura del open) pero el store ya no la contiene:
+    el ``ValueError`` se informa y NO llega env parcial ni a cache ni a
+    ``os.environ``.
+    """
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOT_2026})
+    cacheados, aplicados = _spy_aplicar_env(monkeypatch)
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+    env_antes = dict(os.environ)
+
+    estado = path_manager.estado_panel(ruta, "pedro", "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "pedro", ruta, "macOS", perfiles=["ana", "pedro"]
+    )
+    qtbot.addWidget(dialogo)
+
+    dialogo.combo_perfiles.setCurrentIndex(0)  # selecciona "ana" (ya no existe)
+
+    assert cacheados == []
+    assert aplicados == []
+    assert dict(os.environ) == env_antes
+    assert fake_nuke.messages, "el ValueError se informa via nuke.message"
+    assert "ana" in fake_nuke.messages[-1]
+
+
+def test_legacy_avisa_regeneracion_y_sigue_onboarding(qtbot, monkeypatch, tmp_path):
+    """Spec S4 escenario "legacy store warns before onboarding".
+
+    Una entrada con forma VIEJA (hosts/default) flaggeada por el helper
+    dispara el aviso de regeneracion al abrir y el flujo sigue con el
+    formulario de onboarding (forma nueva).
+    """
+    monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
+    ruta = _escribir_store(tmp_path, {"ana": _LEGACY})
+    fake_nuke = _NukeFake()
+    monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
+
+    estado = path_manager.estado_panel(ruta, "ana", "macOS")
+    assert estado["legacy"] is True
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS", perfiles=["ana"]
+    )
+    qtbot.addWidget(dialogo)
+
+    assert fake_nuke.messages, "el aviso legacy se muestra via nuke.message"
+    assert any("regener" in m.lower() for m in fake_nuke.messages)
+    assert dialogo.boton_onboarding is not None  # el flujo sigue con onboarding
+
+
+# ---------------------------------------------------------------------------
+# REQ-2: onboarding -> asegurar_perfil una vez + env aplicado (usuario-solo)
 # ---------------------------------------------------------------------------
 
 
 def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"pedro": _ROOTS})
+    ruta = _escribir_store(tmp_path, {"pedro": _ROOT_2026})
 
     aseguraron = []
     real_asegurar = rutas_engine.asegurar_perfil
@@ -202,10 +432,13 @@ def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_
 
     estado = path_manager.estado_panel(ruta, "nuevo", "macOS")
     assert estado["conocido"] is False
-    dialogo = path_manager_panel.PathManagerDialog(estado, "nuevo", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "nuevo", ruta, "macOS", perfiles=["pedro"]
+    )
     qtbot.addWidget(dialogo)
 
     assert dialogo.label_perfil.text() == "Onboarding: defina la base del proyecto"
+    assert "nuevo" not in _items_combo(dialogo.combo_perfiles)
 
     dialogo.campo_base.setText("/Volumes/estudio/2026")
     dialogo.boton_onboarding.click()
@@ -223,34 +456,41 @@ def test_onboarding_submit_asegura_una_vez_y_aplica_env(qtbot, monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
-# REQ-3 (2.3): cambio de base -> env re-aplicado a la base nueva
+# REQ-3 (S4): cambio de base por ESPACIO -> slot persistido + env re-aplicado
 # ---------------------------------------------------------------------------
 
 
-def test_cambio_base_reaplica_env_2027(qtbot, monkeypatch, tmp_path):
+def test_cambio_base_por_espacio_persiste_y_aplica_env(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(entorno, "estado_unidad", _marcar_conectado)
-    ruta = _escribir_store(tmp_path, {"ana": _ROOTS})
+    ruta = _escribir_store(tmp_path, {"ana": _ROOT_2026})
     _, aplicados = _spy_aplicar_env(monkeypatch)
     fake_nuke = _NukeFake()
     monkeypatch.setattr(path_manager_panel, "nuke", fake_nuke)
 
     estado = path_manager.estado_panel(ruta, "ana", "macOS")
-    dialogo = path_manager_panel.PathManagerDialog(estado, "ana", ruta, "macOS")
+    dialogo = path_manager_panel.PathManagerDialog(
+        estado, "ana", ruta, "macOS", perfiles=["ana"]
+    )
     qtbot.addWidget(dialogo)
 
-    dialogo.campo_base.setText("/Volumes/estudio/2027")
+    dialogo.combo_espacio.setCurrentText("COMP")
+    dialogo.campo_base.setText("/Volumes/estudio/2026/CINE2/COMP")
     dialogo.boton_cambio.click()
 
-    assert aplicados[-1]["PROJECT_ROOT"] == "/Volumes/estudio/2027"
-    assert os.environ["PROJECT_ROOT"] == "/Volumes/estudio/2027"
-    assert fake_nuke.messages, "el submit debe informar al artista via nuke.message"
+    # Slot (COMP, macOS) reemplazado; raices de otros espacios/SO intactas.
     guardado = rutas_engine.leer_perfiles(ruta)
-    assert guardado["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2027/COMP"
+    assert guardado["ana"]["COMP"]["macOS"] == "/Volumes/estudio/2026/CINE2/COMP"
     assert guardado["ana"]["COMP"]["Windows"] == "L:/VFX/2026/CINE/COMP"
+    assert guardado["ana"]["TO_VFX"]["macOS"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    # El env se re-aplica via injector (PROJECT_ROOT = fallback AD7: primera
+    # raiz del SO sin corte ni base).
+    assert aplicados[-1]["PROJECT_ROOT"] == "/Volumes/estudio/2026/CINE/TO_VFX"
+    assert os.environ["PROJECT_ROOT"] == aplicados[-1]["PROJECT_ROOT"]
+    assert fake_nuke.messages, "el submit debe informar al artista via nuke.message"
 
 
 # ---------------------------------------------------------------------------
-# REQ-5 (2.3): abrir_dialogo degrade headless
+# REQ-5: abrir_dialogo degrade headless
 # ---------------------------------------------------------------------------
 
 
@@ -269,8 +509,6 @@ def test_abrir_dialogo_sin_pyside_no_levanta(monkeypatch):
     import importlib
     import sys
 
-    # Reimportar el modulo con PySide bloqueado: la capa de import degrada y
-    # ``abrir_dialogo`` sigue invocable sin levantar (REQ-5).
     monkeypatch.delitem(sys.modules, "SamanTools.ui.path_manager_panel", raising=False)
     original_import = builtins.__import__
 
