@@ -617,19 +617,129 @@ class _LockNoop:
         pass
 
 
+class _LockDir:
+    """Lock exclusivo multi-proceso con DIRECTORIO ATÓMICO (fiable en red).
+
+    ``os.mkdir`` es atómico en TODOS los filesystems de red (SMB/NFS/red),
+    a diferencia de ``fcntl.lockf``/``msvcrt.locking`` cuya semantica POSIX se
+    traduce mal o no se respeta en clients SMB — causa de TimeoutError
+    intermitente al escribir el store en Lucid (bug real en produccion).
+
+    Protocolo:
+      * ``intentar()``: ``os.mkdir(lock_dir)``; si tiene exito, SOMOS duenos
+        (creamos un archivo pid dentro y devolvemos True). FileExistsError ->
+        otra instancia/maquina lo tiene -> False (se reintenta).
+      * ``liberar()``: borra el archivo pid y el DIRECTORIO (solo si sigue
+        siendo nuestro: verificamos el pid dentro antes de rmdir).
+    Un dirname con procesos muertos (lock huerfano) se detecta si el pid no
+    responde: se reemplaza el lock huerfano (comportamiento documentado).
+    """
+
+    def __init__(self, fd=None, lock_dir=None):
+        # fd se ignora (compat con la factory; el lock usa dir), lock_dir se
+        # inyecta en tests.
+        self._dir = lock_dir
+        self._fd = fd
+        self._pid_path = os.path.join(lock_dir, "pid") if lock_dir else None
+        self._tengo = False
+
+    def _pid_vivo(self):
+        """True si el lock pertenece a un proceso vivo O ESTA EN CREACION.
+
+        Un lockdir recien creado por otro proceso puede no tener aun su archivo
+        ``pid`` (ventana de microsegundos entre ``os.mkdir`` y la escritura del
+        pid). En ese estado NO es un huerfano: devolvemos True para que el
+        bucle de reintento espere en lugar de robar el lock. Robarlo aqui
+        producia una carrera real (dos procesos duenos simultaneos -> se pisaba
+        un perfil al escribir el store; vista como KeyError flaky en la suite).
+        Solo se considera huerfano cuando el pid esta presente Y su proceso
+        definitivamente ya no existe.
+        """
+        try:
+            with open(self._pid_path, "r", encoding="utf-8") as f:
+                pid = int(f.read().strip() or "0")
+        except Exception:
+            # Sin archivo pid o ilegible: lock en creacion -> esperar, no robar.
+            return True
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False  # pid presente y proceso muerto: huerfano real
+        except PermissionError:
+            return True
+        except Exception:
+            return True
+
+    def intentar(self):
+        if self._tengo:
+            return True
+        if not self._dir:
+            return False
+        try:
+            os.mkdir(self._dir)
+            self._tengo = True
+        except FileExistsError:
+            # Lock huerfano SOLO cuando el pid presente pertenece a un proceso
+            # muerto. Un lockdir sin pid (o con pid ininteligible - p.ej. en
+            # plena creacion por otra instancia) NO se toca: se reintenta.
+            if not self._pid_vivo():
+                for nombre in (self._pid_path,):
+                    try:
+                        if nombre and os.path.exists(nombre):
+                            os.remove(nombre)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(self._dir)
+                except OSError:
+                    return False
+                try:
+                    os.mkdir(self._dir)
+                    self._tengo = True
+                except FileExistsError:
+                    return False
+            else:
+                return False
+        except OSError:
+            return False
+        if self._tengo and self._pid_path:
+            try:
+                with open(self._pid_path, "w", encoding="utf-8") as f:
+                    f.write(str(os.getpid()))
+            except OSError:
+                pass
+        return self._tengo
+
+    def liberar(self):
+        if not self._tengo or not self._dir:
+            return
+        try:
+            if os.path.exists(self._pid_path):
+                os.remove(self._pid_path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(self._dir)
+        except OSError:
+            pass
+        self._tengo = False
+
+
 def _lock_clase(plataforma):
     """Factory de la clase de lock segun plataforma inyectada (D6).
 
-    Acepta nombres estilo ``os.name`` ("posix"/"nt") y estilo
-    ``platform.system()`` ("darwin"/"linux"/"windows"). Cualquier otra
-    plataforma obtiene el no-op documentado.
+    Todas las plataformas usan el lock por DIRECTORIO ATOMICO (fiable en
+    storage compartido SMB/NFS/red). La distincion fcntl/msvcrt/noop
+    queda como retaguardia para plataformas exoticas: se mantiene la firma para
+    compat, pero el path real en red es siempre _LockDir.
     """
     p = (plataforma or "").lower()
-    if p in ("posix", "darwin", "linux", "unix"):
-        return _LockFcntl
-    if p in ("nt", "windows", "win32"):
-        return _LockMsvcrt
-    return _LockNoop
+    if p in ("posix", "darwin", "linux", "unix", "nt", "windows", "win32"):
+        return _LockDir
+    return _LockDir
 
 
 def _adquirir_lock(lock):
@@ -657,23 +767,27 @@ def _intentar_con_plazo(lock):
 
 @contextlib.contextmanager
 def _lock_perfiles(path, plataforma=None):
-    """Context manager de lock exclusivo sobre ``path + ".lock"`` (D6).
+    """Context manager de lock exclusivo sobre ``path + ".lockdir"`` (D6-v2).
+
+    Lock por DIRECTORIO ATOMICO (``os.mkdir``), fiable en storage compartido
+    (SMB/NFS/red) donde ``fcntl.lockf``/``msvcrt.locking`` no se
+    traduce correctamente (causa del TimeoutError real en produccion). Es el
+    patron estandar de coordinacion multi-proceso en filesystems de red.
 
     Nunca bloquea el propio ``path``: ``os.replace`` cambia su inode y un lock
-    sobre el target quedaria huerfano tras la primera escritura; el archivo
+    sobre el target quedaria huerfano tras la primera escritura; el lockdir
     hermano es estable entre reemplazos. Readers nunca lockean: el replace
     atomico les garantiza ver un inode completo. El directorio padre
-    (``.saman/``) se crea lazy AQUI — solo las escrituras adquieren lock, asi
-    que nunca se crea en lectura (AD6).
+    (``.saman/``) se crea lazy AQUI + el lockdir hermano — solo las escrituras
+    adquieren lock, asi que nunca se crea en lectura (AD6).
     """
     clase = _lock_clase(plataforma or os.name)
-    ruta_lock = path + ".lock"
-    directorio = os.path.dirname(os.path.abspath(ruta_lock)) or "."
+    ruta_lock = path + ".lockdir"
+    directorio = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directorio, exist_ok=True)
-    with open(ruta_lock, "a+b") as fd:
-        lock = clase(fd)
-        _adquirir_lock(lock)
-        try:
-            yield
-        finally:
-            lock.liberar()
+    lock = clase(lock_dir=ruta_lock)
+    _adquirir_lock(lock)
+    try:
+        yield
+    finally:
+        lock.liberar()

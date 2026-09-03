@@ -17,7 +17,8 @@ onboarding D3 (TDD estricto):
   base inyectada por forma.
 * ``ruta_para_espacio`` — root del espacio para el SO; ``None`` sin raise.
 * ``_lock_perfiles`` — context manager sobre el archivo HERMANO
-  ``path + ".lock"`` (nunca el target: os.replace cambia el inode), reintentos
+  ``path + ".lockdir"`` (directorio atomico, fiable en red; nunca el target:
+  os.replace cambia el inode), reintentos
   3×2.0s → ``TimeoutError``; ``_lock_clase`` fcntl/msvcrt/no-op.
 * Concurrencia REAL (G5/G6): dos procesos escriben usuarios distintos bajo
   lock; dos procesos onbordean el MISMO usuario y el perdedor devuelve el
@@ -123,9 +124,9 @@ def test_guardar_perfiles_round_trip_sin_temporales(tmp_path):
     store = {"ana": _perfil_por_defecto()}
     rutas_engine.guardar_perfiles(ruta, store)
     assert rutas_engine.leer_perfiles(ruta) == store
-    # El lock hermano persiste por diseno (D6); no debe quedar NINGUN temporal.
+    # El lockdir se crea y autolimpia en la escritura (D6-v2); sin temporales.
     nombres = sorted(p.name for p in tmp_path.iterdir())
-    assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]
+    assert nombres == ["nuke_profiles.json"]  # lockdir autolimpio (D6-v2)
 
 
 def test_guardar_perfiles_preserva_claves_top_level_desconocidas(tmp_path):
@@ -258,44 +259,50 @@ def test_ruta_para_espacio_combinacion_ausente_devuelve_none():
     assert rutas_engine.ruta_para_espacio(None, "COMP", "macOS") is None
 
 
-# --- Lock: _lock_clase factory (D6) -------------------------------------------
+# --- Lock: _lock_clase factory (D6-v2: directorio atomico, fiable en red) -------
 
 
-def test_lock_clase_posix_devuelve_clase_fcntl():
-    assert rutas_engine._lock_clase("posix") is rutas_engine._LockFcntl
-    assert rutas_engine._lock_clase("darwin") is rutas_engine._LockFcntl
-    assert rutas_engine._lock_clase("linux") is rutas_engine._LockFcntl
+def test_lock_clase_siempre_devuelve_directorio_atomico():
+    # Todas las plataformas usan _LockDir: es el unico fiable en storage
+    # compartido (SMB/NFS/red) — fcntl/msvcrt se descartaron por el
+    # TimeoutError real en produccion.
+    for p in ("posix", "darwin", "linux", "nt", "windows", "plan9", ""):
+        assert rutas_engine._lock_clase(p) is rutas_engine._LockDir
 
 
-def test_lock_clase_nt_devuelve_clase_msvcrt():
-    assert rutas_engine._lock_clase("nt") is rutas_engine._LockMsvcrt
-    assert rutas_engine._lock_clase("windows") is rutas_engine._LockMsvcrt
+def test_lock_dir_adquiere_y_libera(tmp_path):
+    """D6-v2: mkdir atomico -> somos duenos; liberar -> se puede re-adquirir."""
+    lock = rutas_engine._LockDir(lock_dir=str(tmp_path / "perfiles.json.lockdir"))
+    assert lock.intentar() is True
+    assert os.path.isdir(str(tmp_path / "perfiles.json.lockdir"))
+    lock.liberar()
+    assert not os.path.exists(str(tmp_path / "perfiles.json.lockdir"))
+    # re-adquisicion tras liberar
+    assert lock.intentar() is True
+    lock.liberar()
 
 
-def test_lock_clase_desconocida_devuelve_noop():
-    fcntl_cls = rutas_engine._lock_clase("posix")
-    assert rutas_engine._lock_clase("plan9") is rutas_engine._LockNoop
-    assert rutas_engine._lock_clase("") is rutas_engine._LockNoop
-    assert rutas_engine._LockNoop is not fcntl_cls
+def test_lock_dir_segunda_instancia_no_adquiere_mientras_el_primero_tiene(tmp_path):
+    """D6-v2: dos instancias contendiendo -> la 2da devuelve False hasta liberar."""
+    dir_lock = str(tmp_path / "perfiles.lockdir")
+    a = rutas_engine._LockDir(lock_dir=dir_lock)
+    b = rutas_engine._LockDir(lock_dir=dir_lock)
+    assert a.intentar() is True
+    assert b.intentar() is False
+    a.liberar()
+    assert b.intentar() is True
+    b.liberar()
 
 
-def test_lock_fcntl_real_adquiere_y_libera(tmp_path):
-    pytest.importorskip("fcntl")
-    ruta = str(tmp_path / "perfiles.json.lock")
-    with open(ruta, "a+b") as fd:
-        lock = rutas_engine._lock_clase("posix")(fd)
-        assert lock.intentar() is True
-        lock.liberar()
-        assert lock.intentar() is True
-        lock.liberar()
-
-
-def test_lock_noop_nunca_bloquea(tmp_path):
-    ruta = str(tmp_path / "perfiles.json.lock")
-    with open(ruta, "a+b") as fd:
-        lock = rutas_engine._lock_clase("plan9")(fd)
-        assert lock.intentar() is True
-        lock.liberar()  # no-op documentado: no debe lanzar
+def test_lock_dir_huerfano_se_reemplaza(tmp_path):
+    """D6-v2: lock dejado por proceso muerto (pid inexistente) se reemplaza."""
+    dir_lock = str(tmp_path / "perfiles.lockdir")
+    os.makedirs(dir_lock, exist_ok=True)
+    with open(os.path.join(dir_lock, "pid"), "w", encoding="utf-8") as f:
+        f.write("999999")  # pid gigante que no existe
+    lock = rutas_engine._LockDir(lock_dir=dir_lock)
+    assert lock.intentar() is True  # reemplaza el huerfano
+    lock.liberar()
 
 
 # --- Lock: _lock_perfiles context manager --------------------------------------
@@ -305,8 +312,8 @@ def test_lock_perfiles_usa_sibling_y_libera_al_salir(monkeypatch, tmp_path):
     instancias = []
 
     class LockFalsoRastreador:
-        def __init__(self, fd):
-            self.fd = fd
+        def __init__(self, lock_dir=None, fd=None):
+            self.lock_dir = lock_dir
             self.liberado = False
             instancias.append(self)
 
@@ -320,15 +327,16 @@ def test_lock_perfiles_usa_sibling_y_libera_al_salir(monkeypatch, tmp_path):
     ruta = str(tmp_path / "perfiles.json")
     with rutas_engine._lock_perfiles(ruta):
         assert len(instancias) == 1
-        assert instancias[0].fd.name == ruta + ".lock"
+        assert instancias[0].lock_dir == ruta + ".lockdir"
         assert instancias[0].liberado is False
     assert instancias[0].liberado is True
-    assert os.path.exists(ruta + ".lock")
+    # el lockdir se limpia al liberar (no queda archivo/dir residual)
+    assert not os.path.exists(ruta + ".lockdir")
 
 
 def test_lock_perfiles_agotado_lanza_timeouterror(monkeypatch, tmp_path):
     class LockAtascado:
-        def __init__(self, fd):
+        def __init__(self, lock_dir=None, fd=None):
             pass
 
         def intentar(self):
@@ -393,9 +401,9 @@ def test_guardar_concurrente_multiproceso_no_pierde_perfiles(tmp_path):
     esperado = rutas_engine.crear_perfil_default()
     assert store["ana"] == esperado
     assert store["pedro"] == esperado
-    # Sin temporales: solo el store y su lock hermano (por diseno, D6).
+    # Sin temporales: lockdir autolimpio (D6-v2); solo queda el store.
     nombres = sorted(p.name for p in tmp_path.iterdir())
-    assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]
+    assert nombres == ["nuke_profiles.json"]  # lockdir autolimpio (D6-v2)
 
 
 def _worker_resolver_perfil(ruta, usuario, bar, cola):
@@ -438,7 +446,7 @@ def test_onboarding_concurrente_mismo_usuario_no_duplica(tmp_path):
     store = rutas_engine.leer_perfiles(ruta)
     assert store == {"nuevo": esperado}
     nombres = sorted(p.name for p in tmp_path.iterdir())
-    assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]
+    assert nombres == ["nuke_profiles.json"]  # lockdir autolimpio (D6-v2)
 
 
 # --- resolver_perfil (spec: resolution by user, sin hostname) -----------------
