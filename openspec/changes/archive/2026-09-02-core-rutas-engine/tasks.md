@@ -92,10 +92,10 @@ both together), so slices stay per-module/per-concern.
 
 ## Group G8 — Final verification (Phase 4: verification; last commit of PR 7)
 
-- [ ] 8.1 Run `python3 -m pytest` from root on a machine without Nuke — full suite green (proposal success criteria 1).
-- [ ] 8.2 `python3 -m py_compile` on EVERY touched `.py` under `SamanTools/` and `tests/` (config.yaml apply rule).
-- [ ] 8.3 Real-token grep audit (proposal success criteria 4): `grep -rniE 'wupm|LucidLink|HTLR|PCF' SamanTools tests` → matches ONLY in the self-exempt `tests/test_no_import_nuke_en_core.py`; anything else fails the change.
-- [ ] 8.4 Confirm no temp files left by engine tests; sibling `.lock` file may persist by design (D6); update commit list.
+- [x] 8.1 Run `python3 -m pytest` from root on a machine without Nuke — full suite green (proposal success criteria 1). Evidence: 139 passed, exit 0 (2.45s).
+- [x] 8.2 `python3 -m py_compile` on EVERY touched `.py` under `SamanTools/` and `tests/` (config.yaml apply rule). Evidence: 12/12 files OK, exit 0.
+- [x] 8.3 Real-token grep audit (proposal success criteria 4): `grep -rniE 'wupm|LucidLink|HTLR|PCF' SamanTools tests` → matches ONLY in the self-exempt `tests/test_no_import_nuke_en_core.py`; anything else fails the change. Evidence: 6 matches, all in guard test (lines 8/30/153/161/174); 0 in sources. `__pycache__` excluded (7 .pyc binary false-positives embedding `/Volumes/wupm/2026` workspace path).
+- [x] 8.4 Confirm no temp files left by engine tests; sibling `.lock` file may persist by design (D6); update commit list. Evidence: 0 temp/lock/`.json` leftovers repo-wide; change completes at commit caf4f0d (G7) — G8 is verification-only, no new commit.
 
 ## Out of Scope (do NOT implement)
 
