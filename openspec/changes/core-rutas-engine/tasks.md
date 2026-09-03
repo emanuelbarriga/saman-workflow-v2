@@ -62,9 +62,9 @@ both together), so slices stay per-module/per-concern.
 
 ## Group G3 — Extract `nombres` (Phase 2; PR 3)
 
-- [ ] 3.1 RED/port: `tests/test_nombres.py` from V1 (167l), neutralized to fictitious paths (`/Volumes/estudio/2026`, `L:/VFX/2026`, `CINE`); covers canonical parse, folder-chapter authoritative, malformed version to end, lowercase version uppercased, `comp_SAMAN`/`comp_OTRA` metadata, PNG version-less, bare basename, Windows backslashes, invalid never raises.
-- [ ] 3.2 GREEN: copy V1 `SamanTools/nombres.py` → `SamanTools/core/nombres.py`; neutralize; keep relative import `from .entorno import` (valid — D4 graph, entorno landed in G2).
-- [ ] 3.3 Verify suite green + `py_compile`; scenario `comp_OTRA` preserved untouched.
+- [x] 3.1 RED/port: `tests/test_nombres.py` from V1 (167l), neutralized to fictitious paths (`/Volumes/estudio/2026`, `L:/VFX/2026`, `CINE`); covers canonical parse, folder-chapter authoritative, malformed version to end, lowercase version uppercased, `comp_SAMAN`/`comp_OTRA` metadata, PNG version-less, bare basename, Windows backslashes, invalid never raises.
+- [x] 3.2 GREEN: copy V1 `SamanTools/nombres.py` → `SamanTools/core/nombres.py`; neutralize; keep relative import `from .entorno import` (valid — D4 graph, entorno landed in G2).
+- [x] 3.3 Verify suite green + `py_compile`; scenario `comp_OTRA` preserved untouched.
 
 ## Group G4 — Extract `limpiar` (Phase 2; PR 4)
 
