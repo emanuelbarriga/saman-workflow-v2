@@ -44,7 +44,7 @@ import subprocess
 import traceback
 
 # --- Configuracion: ajusta solo si cambias de cuenta/repo --------------------
-REPO_URL = "https://github.com/TU_USUARIO/saman-tools.git"
+REPO_URL = "https://github.com/emanuelbarriga/saman-workflow-v2.git"
 BRANCH = "main"
 MARCADOR = "SamanTools V2 bootstrap"
 # -----------------------------------------------------------------------------
