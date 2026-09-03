@@ -1,7 +1,7 @@
-"""Tests del motor de rutas: store de perfiles JSON + lock (slice G5).
+"""Tests del motor de rutas: store + lock (G5) y resolucion + onboarding (G6).
 
-Este archivo cubre la primera parte del motor ``SamanTools/core/rutas_engine.py``
-(esquema D1, lock D6, TDD estricto):
+Este archivo cubre el motor ``SamanTools/core/rutas_engine.py`` (esquema D1,
+lock D6, precedencia D2, onboarding D3, TDD estricto):
 
 * ``leer_perfiles`` — archivo inexistente → ``{}``; JSON malformado → ``ValueError``;
   devuelve el dict interno ``perfiles`` del envelope.
@@ -12,8 +12,20 @@ Este archivo cubre la primera parte del motor ``SamanTools/core/rutas_engine.py`
 * ``_lock_perfiles`` — context manager sobre el archivo HERMANO ``path + ".lock"``
   (nunca el target: os.replace cambia el inode), reintentos 3×2.0s → ``TimeoutError``.
 * ``_lock_clase`` — factory fcntl/msvcrt/no-op con plataforma inyectada.
-* Concurrencia REAL: dos procesos escriben perfiles distintos bajo lock con
+* Concurrencia REAL (G5): dos procesos escriben perfiles distintos bajo lock con
   barrera de arranque en POSIX; el resultado final contiene AMBOS perfiles.
+* ``_emparejar_perfil`` — escalera de precedencia D2: par exacto → user-only
+  default → hostname-only (primer usuario en orden de documento) → ``None``
+  (marcador de onboarding; la API publica lo absorbe).
+* ``resolver_perfil`` — par conocido y fallback user-only; desconocido →
+  onboarding sin raise; determinismo (mismos inputs → mismos outputs).
+* ``asegurar_perfil`` — onboarding bajo lock: re-read + re-resolve (carrera
+  ganada devuelve el ganador sin reescribir), merge por usuario, base inyectada
+  con slotting.
+* ``ruta_para_plataforma`` — raiz por plataforma; ``None`` si la plataforma
+  no esta en el perfil.
+* Concurrencia REAL (G6): dos procesos onbordean el MISMO par sobre store vacio;
+  el perdedor devuelve el perfil del ganador y no duplica.
 
 Todas las rutas son ficticias (``/Volumes/estudio/2026``, ``L:/VFX/2026``,
 ``/mnt/estudio/2026``); ninguna ruta real del estudio aparece en fixtures.
@@ -296,5 +308,179 @@ def test_guardar_concurrente_multiproceso_no_pierde_perfiles(tmp_path):
     assert store["pedro"]["hosts"]["ws2"] == esperado
     assert store["pedro"]["default"] == esperado
     # Sin temporales: solo el store y su lock hermano (por diseno, D6).
+    nombres = sorted(p.name for p in tmp_path.iterdir())
+    assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]
+
+
+# --- G6: Emparejamiento por precedencia (D2) ----------------------------------
+
+
+_ROOTS_CUSTOM = {"macOS": "/Volumes/custom/2026", "Windows": "L:/CUSTOM/2026", "Linux": "/mnt/custom/2026"}
+
+
+def test_emparejar_perfil_par_exacto_gana_sobre_default():
+    perfiles = {"ana": {"hosts": {"ws1": _ROOTS_CUSTOM}, "default": _roots_por_defecto()}}
+    match = rutas_engine._emparejar_perfil("ana", "ws1", perfiles)
+    assert match == _ROOTS_CUSTOM
+    assert set(match.keys()) == {"macOS", "Windows", "Linux"}  # misma forma (D2)
+
+
+def test_emparejar_perfil_fallback_user_only():
+    # spec: store que contiene solo al usuario "ana" (sin hosts)
+    perfiles = {"ana": {"default": _roots_por_defecto()}}
+    match = rutas_engine._emparejar_perfil("ana", "otra-maquina", perfiles)
+    assert match == _roots_por_defecto()
+    assert set(match.keys()) == {"macOS", "Windows", "Linux"}
+
+
+def test_emparejar_perfil_hostname_only_primer_usuario_por_orden_documento():
+    roots_pedro = {"macOS": "/Volumes/pedro/2026", "Windows": "L:/PEDRO/2026", "Linux": "/mnt/pedro/2026"}
+    roots_lucia = {"macOS": "/Volumes/lucia/2026", "Windows": "L:/LUCIA/2026", "Linux": "/mnt/lucia/2026"}
+    perfiles = {
+        "pedro": {"hosts": {"ws9": roots_pedro}},
+        "lucia": {"hosts": {"ws9": roots_lucia}},
+    }
+    match = rutas_engine._emparejar_perfil("nadie", "ws9", perfiles)
+    assert match == roots_pedro  # primero en orden de documento (D2)
+    assert set(match.keys()) == {"macOS", "Windows", "Linux"}
+
+
+def test_emparejar_perfil_desconocido_devuelve_marcador_none():
+    assert rutas_engine._emparejar_perfil("nadie", "pc99", {}) is None
+    # usuario existente pero sin el host ni default: tampoco hay match
+    perfiles = {"ana": {"hosts": {"ws1": _roots_por_defecto()}}}
+    assert rutas_engine._emparejar_perfil("ana", "pc99", perfiles) is None
+
+
+# --- G6: resolver_perfil (spec: resolution by user/hostname) ------------------
+
+
+def test_resolver_perfil_par_conocido_devuelve_roots(tmp_path):
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(
+        ruta, {"ana": {"hosts": {"ws1": _roots_por_defecto()}, "default": _roots_por_defecto()}}
+    )
+    assert rutas_engine.resolver_perfil("ana", "ws1", ruta) == _roots_por_defecto()
+
+
+def test_resolver_perfil_fallback_user_only(tmp_path):
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"ana": {"default": _roots_por_defecto()}})
+    assert rutas_engine.resolver_perfil("ana", "otra-maquina", ruta) == _roots_por_defecto()
+
+
+def test_resolver_perfil_onboarding_crea_persiste_y_segundo_resolve(tmp_path):
+    """Spec: store sin 'nuevo'/'pc9' y path escribible → onboarding sin raise."""
+    ruta = str(tmp_path / "nuke_profiles.json")
+    roots = rutas_engine.resolver_perfil("nuevo", "pc9", ruta)
+    assert roots == _roots_por_defecto()
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["nuevo"]["hosts"]["pc9"] == _roots_por_defecto()
+    assert store["nuevo"]["default"] == _roots_por_defecto()
+    # espec: "a later resolver_perfil for that pair MUST return it"
+    assert rutas_engine.resolver_perfil("nuevo", "pc9", ruta) == _roots_por_defecto()
+
+
+def test_resolver_perfil_determinismo_mismos_inputs_mismos_outputs(tmp_path):
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"ana": {"hosts": {"ws1": _roots_por_defecto()}}})
+    r1 = rutas_engine.resolver_perfil("ana", "ws1", ruta)
+    r2 = rutas_engine.resolver_perfil("ana", "ws1", ruta)
+    assert r1 == r2 == _roots_por_defecto()
+
+
+# --- G6: asegurar_perfil (onboarding bajo lock, D3) ---------------------------
+
+
+def test_asegurar_perfil_crea_y_devuelve_roots(tmp_path):
+    ruta = str(tmp_path / "nuke_profiles.json")
+    roots = rutas_engine.asegurar_perfil("lucia", "ws2", ruta)
+    assert roots == _roots_por_defecto()
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["lucia"]["hosts"]["ws2"] == _roots_por_defecto()
+    assert store["lucia"]["default"] == _roots_por_defecto()
+
+
+def test_asegurar_perfil_base_inyectada_rellena_slot_linux(tmp_path):
+    ruta = str(tmp_path / "nuke_profiles.json")
+    roots = rutas_engine.asegurar_perfil("rafa", "ws3", ruta, base="/mnt/estudio/2027")
+    esperado = {"macOS": "/Volumes/estudio/2026", "Windows": "L:/VFX/2026", "Linux": "/mnt/estudio/2027"}
+    assert roots == esperado
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["rafa"]["hosts"]["ws3"] == esperado
+    assert store["rafa"]["default"] == esperado
+
+
+def test_asegurar_perfil_carrera_ganada_devuelve_existente_sin_reescribir(tmp_path):
+    """Carrera simulada: el otro proceso ya creo el perfil entre nuestra lectura y el lock.
+
+    El re-read bajo lock encuentra el match y devuelve el perfil del ganador SIN
+    reescribir: nada de roots ficticias por encima ni 'default' anadido ajeno.
+    """
+    ruta = str(tmp_path / "nuke_profiles.json")
+    rutas_engine.guardar_perfiles(ruta, {"nuevo": {"hosts": {"pc9": _ROOTS_CUSTOM}}})
+    roots = rutas_engine.asegurar_perfil("nuevo", "pc9", ruta)
+    assert roots == _ROOTS_CUSTOM  # el ganador, no el default ficticio
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store["nuevo"]["hosts"] == {"pc9": _ROOTS_CUSTOM}
+    assert "default" not in store["nuevo"]  # sin rewrite: nada ajeno se agrego
+
+
+# --- G6: ruta_para_plataforma (tri-platform mapping) --------------------------
+
+
+@pytest.mark.parametrize("so", ["macOS", "Windows", "Linux"])
+def test_ruta_para_plataforma_cada_plataforma(so):
+    perfil = _roots_por_defecto()
+    assert rutas_engine.ruta_para_plataforma(perfil, so) == perfil[so]
+
+
+def test_ruta_para_plataforma_plataforma_ausente_devuelve_none():
+    perfil = {"macOS": "/Volumes/estudio/2026", "Windows": "L:/VFX/2026"}  # sin Linux
+    assert rutas_engine.ruta_para_plataforma(perfil, "Linux") is None
+    assert rutas_engine.ruta_para_plataforma(perfil, "Solaris") is None
+
+
+# --- G6: Concurrencia REAL de onboarding (carrera mismo par, D3) ---------------
+
+
+def _worker_resolver_perfil(ruta, usuario, hostname, bar, cola):
+    """Worker de proceso: espera la barrera y resuelve (onbordea si hace falta)."""
+    try:
+        bar.wait()
+        cola.put(rutas_engine.resolver_perfil(usuario, hostname, ruta))
+    except Exception as exc:  # pragma: no cover - el padre falla con el objeto
+        cola.put(exc)
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="el lock fcntl POSIX (requisito de este test) no existe en Windows",
+)
+def test_onboarding_concurrente_mismo_par_no_duplica(tmp_path):
+    """Dos procesos onbordean el MISMO par sobre store vacio con barrera.
+
+    El perdedor de la carrera read→lock→write relee bajo lock, encuentra el
+    perfil del ganador y lo devuelve: el store final tiene EXACTAMENTE un
+    ``nuevo``/``pc9`` (sin duplicados ni pisados) y sin temporales.
+    """
+    ruta = str(tmp_path / "nuke_profiles.json")
+    ctx = multiprocessing.get_context()
+    bar = ctx.Barrier(2)
+    cola = ctx.Queue()
+    p1 = ctx.Process(target=_worker_resolver_perfil, args=(ruta, "nuevo", "pc9", bar, cola))
+    p2 = ctx.Process(target=_worker_resolver_perfil, args=(ruta, "nuevo", "pc9", bar, cola))
+    p1.start()
+    p2.start()
+    p1.join(45)
+    p2.join(45)
+    assert p1.exitcode == 0, f"worker 1 fallo (exitcode {p1.exitcode})"
+    assert p2.exitcode == 0, f"worker 2 fallo (exitcode {p2.exitcode})"
+    r1 = cola.get(timeout=10)
+    r2 = cola.get(timeout=10)
+    assert isinstance(r1, dict) and isinstance(r2, dict), f"worker devolvio excepcion: {r1!r} {r2!r}"
+    assert r1 == r2 == _roots_por_defecto()
+    store = rutas_engine.leer_perfiles(ruta)
+    assert store == {"nuevo": {"hosts": {"pc9": _roots_por_defecto()}, "default": _roots_por_defecto()}}
     nombres = sorted(p.name for p in tmp_path.iterdir())
     assert nombres == ["nuke_profiles.json", "nuke_profiles.json.lock"]

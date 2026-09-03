@@ -80,9 +80,9 @@ both together), so slices stay per-module/per-concern.
 
 ## Group G6 — Engine: resolution + onboarding (Phase 2; PR 6)
 
-- [ ] 6.1 RED: precedence tests (exact pair → user-only → hostname-only insertion order → `None` marker; every match same-shaped roots dict, D2); onboarding persists and second resolve returns it; determinism (`ana`/`ws1` twice → identical, spec core-rutas-engine).
-- [ ] 6.2 GREEN: `_emparejar_perfil(user, hostname, perfiles)` (clean D2 order), `resolver_perfil(user, hostname, path)` (miss → `asegurar_perfil(...)`: lock → fresh re-read → re-resolve → merge → atomic write → return; race-won returns winner, D3), `ruta_para_plataforma(perfil, so)` (`perfil.get(so)` → `None`, no raise), `asegurar_perfil` public-ish inner.
-- [ ] 6.3 Verify suite green; `py_compile`.
+- [x] 6.1 RED: precedence tests (exact pair → user-only → hostname-only insertion order → `None` marker; every match same-shaped roots dict, D2); onboarding persists and second resolve returns it; determinism (`ana`/`ws1` twice → identical, spec core-rutas-engine).
+- [x] 6.2 GREEN: `_emparejar_perfil(user, hostname, perfiles)` (clean D2 order), `resolver_perfil(user, hostname, path)` (miss → `asegurar_perfil(...)`: lock → fresh re-read → re-resolve → merge → atomic write → return; race-won returns winner, D3), `ruta_para_plataforma(perfil, so)` (`perfil.get(so)` → `None`, no raise), `asegurar_perfil` public-ish inner.
+- [x] 6.3 Verify suite green; `py_compile`.
 
 ## Group G7 — Engine: mapping, relativization, context, env (Phase 2/3; PR 7)
 

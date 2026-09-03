@@ -1,8 +1,9 @@
 """
-SamanTools.core.rutas_engine - Motor de rutas de composicion V2 (slice G5).
+SamanTools.core.rutas_engine - Motor de rutas de composicion V2 (slices G5+G6).
 
-Parte 1 del motor: STORE de perfiles JSON + LOCK (esquema D1, lock D6 del
-diseno). Este archivo implementa SOLO esa parte:
+Partes 1 y 2 del motor: STORE de perfiles JSON + LOCK (esquema D1, lock D6) y
+RESOLUCION por precedencia + ONBOARDING bajo lock (D2/D3). Este archivo
+implementa:
 
   - ``leer_perfiles`` / ``guardar_perfiles``: store ``nuke_profiles.json`` con
     envelope ``{"perfiles": {usuario: {"hosts": {host: roots}, "default": roots}}}``.
@@ -12,6 +13,17 @@ diseno). Este archivo implementa SOLO esa parte:
   - ``crear_perfil_default``: roots ficticias por plataforma con slotting por
     forma de la base inyectada (``/Volumes/`` → macOS, ``^[A-Za-z]:`` → Windows,
     ``/mnt/`` → Linux; si ninguna coincide, se conservan las tres ficticias).
+  - ``_emparejar_perfil``: escalera de precedencia D2 — par exacto
+    user+hostname → user-only ``default`` → primer usuario en orden de documento
+    con ese hostname → ``None`` (marcador de onboarding; la API publica lo
+    absorbe y nunca lo expone).
+  - ``resolver_perfil``: lee (sin lock) y empareja; desconocido → onboarding
+    via ``asegurar_perfil``. NUNCA lanza por desconocido ni devuelve ``None``.
+  - ``asegurar_perfil``: onboarding bajo el lock: relee y re-resuelve (carrera
+    ganada → devuelve el perfil del ganador sin reescribir); si no, merge por
+    usuario (``hosts[hostname]`` + ``default``) y escritura atomica.
+  - ``ruta_para_plataforma``: raiz del perfil para macOS/Windows/Linux; ``None``
+    si la plataforma no esta en el perfil (sin raise).
   - ``_lock_perfiles``: context manager de lock EXCLUSIVO sobre un archivo
     HERMANO ``path + ".lock"`` — nunca el target: ``os.replace`` cambia el inode
     del target y un lock ahi quedaria huerfano tras la primera escritura.
@@ -20,9 +32,9 @@ diseno). Este archivo implementa SOLO esa parte:
   - ``_lock_clase``: factory con plataforma inyectada para testear ambas ramas
     (fcntl y msvcrt) en cualquier maquina de desarrollo.
 
-La resolucion por precedencia, el onboarding y la relativizacion (G6/G7) vienen
-en slices posteriores; este modulo queda autocontenido y 100% stdlib. Ninguna
-ruta real del estudio: solo raices ficticias ``/Volumes/estudio/2026``,
+La relativizacion, contexto y contrato de entorno (G7) vienen en un slice
+posterior; este modulo queda autocontenido y 100% stdlib, sin ambiente.
+Ninguna ruta real del estudio: solo raices ficticias ``/Volumes/estudio/2026``,
 ``L:/VFX/2026`` y ``/mnt/estudio/2026``.
 """
 
@@ -171,8 +183,20 @@ def guardar_perfiles(path, perfiles):
             actual = {}
         for user, perfil in perfiles.items():
             _mezclar_perfil_usuario(actual, user, perfil)
-        envelope["perfiles"] = actual
-        _escribir_atomico(path, json.dumps(envelope, ensure_ascii=False, indent=2))
+        _escribir_perfiles(path, actual)
+
+
+def _escribir_perfiles(path, perfiles):
+    """Envuelve el dict interno en el envelope y escribe ATOMICO (D1/D3).
+
+    Conserva las claves top-level desconocidas (futuro metadata: ``version``,
+    ``proyecto``...). NO adquiere lock: el caller debe invocarla BAJO
+    ``_lock_perfiles`` (read-merge-write exclusivo, D3) o garantizar por otro
+    medio la ausencia de escritores concurrentes.
+    """
+    envelope = _leer_envelope(path)
+    envelope["perfiles"] = perfiles
+    _escribir_atomico(path, json.dumps(envelope, ensure_ascii=False, indent=2))
 
 
 # --- Perfil default -------------------------------------------------------------
@@ -200,6 +224,95 @@ def crear_perfil_default(base=None):
     elif base.startswith("/mnt/"):
         roots["Linux"] = base
     return roots
+
+
+# --- G6: Resolucion por precedencia (D2) + onboarding bajo lock (D3) -----------
+
+
+def _emparejar_perfil(user, hostname, perfiles):
+    """Empareja user/hostname contra el store interno con la precedencia D2.
+
+    Orden canonico: (1) par exacto ``perfiles[user]["hosts"][hostname]`` -> ese
+    dict de roots; (2) user-only ``perfiles[user]["default"]`` -> ese dict; (3)
+    hostname-only: primer usuario en orden de documento (insercion JSON) cuyo
+    ``hosts[hostname]`` exista -> ese dict (estaciones compartidas: maquina
+    conocida, usuario no); (4) miss -> ``None``: el marcador de onboarding
+    (D2: nunca excepcion; la API publica lo absorbe y nunca lo expone).
+
+    Todo match devuelve el MISMO shape ``{"macOS","Windows","Linux"}`` (D2:
+    "full vs partial" es procedencia, no forma). Valores no-dict se ignoran
+    (D1: claves internas desconocidas no rompen el motor).
+    """
+    usuario = perfiles.get(user)
+    if isinstance(usuario, dict):
+        hosts = usuario.get("hosts")
+        if isinstance(hosts, dict):
+            roots = hosts.get(hostname)
+            if isinstance(roots, dict):
+                return roots
+        default = usuario.get("default")
+        if isinstance(default, dict):
+            return default
+    for perfil in perfiles.values():
+        if not isinstance(perfil, dict):
+            continue
+        hosts = perfil.get("hosts")
+        if not isinstance(hosts, dict):
+            continue
+        roots = hosts.get(hostname)
+        if isinstance(roots, dict):
+            return roots
+    return None
+
+
+def ruta_para_plataforma(perfil, so):
+    """Raiz del perfil para la plataforma ``so``; ``None`` si no esta (D2).
+
+    ``perfil`` es un dict de roots (shape ``{"macOS","Windows","Linux"}``). Si
+    la plataforma pedida no existe en el perfil se devuelve ``None``, sin
+    lanzar: la llamada indice via ``perfil.get(so)`` (D2).
+    """
+    if not isinstance(perfil, dict):
+        return None
+    return perfil.get(so)
+
+
+def asegurar_perfil(user, hostname, path, base=None):
+    """Onboarding: crea y persiste el perfil default bajo lock; sin raise (spec).
+
+    D3: bajo ``_lock_perfiles`` RELEE el store y RE-RESUELVE. Si el par ya
+    existe entre nuestra lectura inicial y la adquisicion del lock (carrera
+    ganada por otro proceso) devuelve el perfil del ganador SIN escribir. Si
+    no, hace merge por usuario (``hosts[hostname]`` + ``default``, via
+    ``_merge_perfil`` — el fallback user-only funciona luego en otras maquinas)
+    y escribe atomico conservando las claves top-level del envelope. Una base
+    inyectada rellena el slot que coincide con su forma
+    (``crear_perfil_default(base)``). Sin interaccion de usuario; nunca raise.
+    """
+    roots = crear_perfil_default(base)
+    with _lock_perfiles(path):
+        store = leer_perfiles(path)
+        ganador = _emparejar_perfil(user, hostname, store)
+        if ganador is not None:
+            return ganador
+        _merge_perfil(store, user, hostname, roots)
+        _escribir_perfiles(path, store)
+    return roots
+
+
+def resolver_perfil(user, hostname, path):
+    """Resuelve las roots por precedencia D2; desconocido -> onboarding (spec).
+
+    Lee (sin lock; el replace atomico garantiza un inode completo) y empareja.
+    Match -> devuelve ese dict de roots tal cual. Miss (marcador ``None`` de
+    ``_emparejar_perfil``) -> ``asegurar_perfil`` bajo lock. NUNCA lanza por
+    desconocido y NUNCA devuelve ``None``: el marcador de onboarding es interno
+    al emparejador y la API publica lo absorbe (D2/D3).
+    """
+    match = _emparejar_perfil(user, hostname, leer_perfiles(path))
+    if match is not None:
+        return match
+    return asegurar_perfil(user, hostname, path)
 
 
 # --- Lock (D6) ------------------------------------------------------------------
