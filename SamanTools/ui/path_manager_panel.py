@@ -36,6 +36,12 @@ Tres modos (mockup vinculante):
   * Avanzado (checkbox marcado): los tres campos a la vista a la vez en el
     orden COMP, FROM_VFX, TO_VFX (Scripts de Nuke / Plates-entrada /
     Renders-salidas); valores actuales del perfil y semaforo propio por campo.
+  * Espacios extra (dentro del modo avanzado, subtree separado D6): una fila
+    por espacio extra del perfil [nombre][SO][ruta][Buscar][OK][-] con
+    selector de SO por fila (D2, default ``self.so``), etiqueta del SO
+    detectado y fila nueva [+ Agregar espacio extra] con nombre validado
+    (D8). Cada OK/[-] persiste/quita SOLO ese extra y re-aplica env por
+    injector; ``guardar()`` sigue persistiendo solo ``campos_avanzados``.
 
 "Guardar y Aplicar" (opcion A): persiste las rutas EDITADAS de los campos
 para el perfil activo del combo y, tras guardar, propaga el env via injector
@@ -73,6 +79,7 @@ except ImportError:
     nuke = None
 
 from ..core import entorno
+from ..core import rutas_engine
 from . import injector
 from . import path_manager
 
@@ -86,6 +93,9 @@ _AVANZADOS = (
     ("FROM_VFX", "Plates / entrada"),
     ("TO_VFX", "Renders y salidas"),
 )
+
+# Opciones del selector de SO por fila de espacio extra (D2: default self.so).
+_SO_OPCIONES = ("macOS", "Windows", "Linux")
 
 _TITULO_NORMAL = "Path Manager — Nuke"
 _TITULO_ONBOARDING = "Path Manager — Bienvenido"
@@ -262,6 +272,42 @@ if QtWidgets is not None:
             self.grupo_avanzado.setVisible(False)
             layout.addWidget(self.grupo_avanzado)
 
+            self.grupo_extras = QtWidgets.QWidget()
+            grupo_extras = QtWidgets.QVBoxLayout(self.grupo_extras)
+            grupo_extras.setContentsMargins(0, 0, 0, 0)
+            grupo_extras.setSpacing(6)
+            grupo_extras.addWidget(QtWidgets.QLabel("Espacios extra:"))
+            self.etiqueta_so_extras = QtWidgets.QLabel(
+                "SO detectado: %s" % self.so
+            )
+            grupo_extras.addWidget(self.etiqueta_so_extras)
+            self.contenedor_extras = QtWidgets.QWidget()
+            self.layout_extras = QtWidgets.QVBoxLayout(self.contenedor_extras)
+            self.layout_extras.setContentsMargins(0, 0, 0, 0)
+            self.layout_extras.setSpacing(2)
+            grupo_extras.addWidget(self.contenedor_extras)
+            self.filas_extras = []
+            fila_nuevo = QtWidgets.QHBoxLayout()
+            fila_nuevo.addWidget(QtWidgets.QLabel("Nuevo espacio extra:"))
+            self.campo_nombre_extra = QtWidgets.QLineEdit()
+            self.campo_nombre_extra.setPlaceholderText("nombre")
+            self.campo_ruta_extra = QtWidgets.QLineEdit()
+            self.campo_ruta_extra.setPlaceholderText("/Volumes/estudio/2026")
+            self.combo_so_extra = QtWidgets.QComboBox()
+            self.combo_so_extra.addItems(list(_SO_OPCIONES))
+            self._elegir_texto(self.combo_so_extra, self.so)
+            self.boton_agregar_extra = QtWidgets.QPushButton(
+                "+ Agregar espacio extra"
+            )
+            self.boton_agregar_extra.clicked.connect(self._agregar_extra)
+            fila_nuevo.addWidget(self.campo_nombre_extra, 1)
+            fila_nuevo.addWidget(self.campo_ruta_extra, 1)
+            fila_nuevo.addWidget(self.combo_so_extra)
+            fila_nuevo.addWidget(self.boton_agregar_extra)
+            grupo_extras.addLayout(fila_nuevo)
+            self.grupo_extras.setVisible(False)
+            layout.addWidget(self.grupo_extras)
+
             fila_botones = QtWidgets.QHBoxLayout()
             self.boton_renombrar = QtWidgets.QPushButton("Renombrar Perfil")
             self.boton_renombrar.clicked.connect(self.renombrar)
@@ -325,9 +371,10 @@ if QtWidgets is not None:
             layout.addLayout(fila_botones)
 
         def _alternar_avanzado(self, avanzado):
-            """Alterna modo simple (una base) <-> avanzado (tres campos)."""
+            """Alterna modo simple (una base) <-> avanzado (tres campos + extras)."""
             self.contenedor_simple.setVisible(not avanzado)
             self.grupo_avanzado.setVisible(avanzado)
+            self.grupo_extras.setVisible(avanzado)
 
         def _aplicar_estado_semaforo(self, estado, label):
             """Vuelca un dict de ``estado_unidad`` en el QLabel (texto + hoja)."""
@@ -404,7 +451,8 @@ if QtWidgets is not None:
             Lectura pura via ``path_manager.raices_para_so`` (relee el store;
             nunca escribe): la base es la primera raiz no-None del SO actual
             (orden canonico) y cada campo avanzado su raiz. Refresca tambien
-            los semaforos de cada campo (cache del motor).
+            los semaforos de cada campo (cache del motor) y el subarbol de
+            espacios extra (D6: subtree separado, datos del mismo perfil).
             """
             activo = self.combo_perfiles.currentText()
             if not activo:
@@ -421,6 +469,242 @@ if QtWidgets is not None:
             for espacio, campo in self.campos_avanzados.items():
                 campo.setText(raices.get(espacio) or "")
                 self._actualizar_semaforo(campo, self.semaforos_avanzados[espacio])
+            self._refrescar_extras()
+
+        def _crear_fila_extra(self, espacio):
+            """Construye una fila de espacio extra: [nombre][SO][ruta][Buscar][OK][-].
+
+            ``espacio`` (nombre sanitizado en el store) se renderiza como
+            QLabel NO editable (D8: el rename de un extra existente esta fuera
+            de alcance); el combo de SO por fila arranca en ``self.so`` (D2) y
+            el semaforo usa ``entorno.estado_unidad`` sobre la raiz del SO
+            seleccionado (raiz ausente -> 'Ruta base vacia', desconectado).
+            """
+            contenedor = QtWidgets.QWidget()
+            fila = QtWidgets.QVBoxLayout(contenedor)
+            fila.setContentsMargins(0, 0, 0, 0)
+            fila.setSpacing(2)
+
+            fila_1 = QtWidgets.QHBoxLayout()
+            etiqueta = QtWidgets.QLabel(espacio)
+            etiqueta.setMinimumWidth(80)
+            combo_so = QtWidgets.QComboBox()
+            combo_so.addItems(list(_SO_OPCIONES))
+            self._elegir_texto(combo_so, self.so)
+            campo = QtWidgets.QLineEdit()
+            campo.setPlaceholderText("/Volumes/estudio/2026")
+            boton_buscar = QtWidgets.QPushButton("Buscar...")
+            boton_ok = QtWidgets.QPushButton("OK")
+            boton_quitar = QtWidgets.QPushButton("-")
+            fila_1.addWidget(etiqueta)
+            fila_1.addWidget(combo_so)
+            fila_1.addWidget(campo, 1)
+            fila_1.addWidget(boton_buscar)
+            fila_1.addWidget(boton_ok)
+            fila_1.addWidget(boton_quitar)
+            fila.addLayout(fila_1)
+
+            fila_semaforo = QtWidgets.QHBoxLayout()
+            sangria = QtWidgets.QLabel("  ")
+            sangria.setFixedWidth(80)
+            semaforo = QtWidgets.QLabel()
+            semaforo.setWordWrap(True)
+            fila_semaforo.addWidget(sangria)
+            fila_semaforo.addWidget(semaforo, 1)
+            fila.addLayout(fila_semaforo)
+
+            registro = {
+                "espacio": espacio,
+                "etiqueta": etiqueta,
+                "combo_so": combo_so,
+                "campo": campo,
+                "semaforo": semaforo,
+                "boton_buscar": boton_buscar,
+                "boton_ok": boton_ok,
+                "boton_quitar": boton_quitar,
+            }
+            boton_buscar.clicked.connect(
+                lambda _checked=False, c=campo: self._buscar_carpeta(c)
+            )
+            boton_ok.clicked.connect(
+                lambda _checked=False, r=registro: self._ok_extra(r)
+            )
+            boton_quitar.clicked.connect(
+                lambda _checked=False, r=registro: self._quitar_extra(r)
+            )
+            combo_so.currentIndexChanged.connect(
+                lambda _indice, r=registro: self._refrescar_fila(r)
+            )
+            self.filas_extras.append(registro)
+            self.layout_extras.addWidget(contenedor)
+            return registro
+
+        def _refrescar_extras(self):
+            """Reconstruye las filas de espacios extra desde el perfil activo.
+
+            Lectura PURA via ``path_manager.raices_para_so`` (relee el store;
+            nunca escribe): se listan solo las claves del perfil fuera de
+            ``_ESPACIOS``, ya ordenadas (D3: canonico primero + extras
+            SORTED). Conserva la seleccion de SO de cada fila existente entre
+            reconstrucciones (add/OK/remove no cambian el SO elegido).
+            """
+            activo = self.combo_perfiles.currentText()
+            if not activo:
+                return
+            raices = path_manager.raices_para_so(activo, self.ruta_store, self.so)
+            if not raices:
+                return
+            extras = [espacio for espacio in raices if espacio not in _ESPACIOS]
+            anteriores = {
+                fila["espacio"]: fila["combo_so"].currentText()
+                for fila in self.filas_extras
+            }
+            while self.layout_extras.count():
+                item = self.layout_extras.takeAt(0)
+                widget = item.widget() if item is not None else None
+                if widget is not None:
+                    widget.deleteLater()
+            self.filas_extras = []
+            for espacio in extras:
+                fila = self._crear_fila_extra(espacio)
+                if espacio in anteriores:
+                    indice = fila["combo_so"].findText(anteriores[espacio])
+                    if indice >= 0:
+                        fila["combo_so"].setCurrentIndex(indice)
+                self._refrescar_fila(fila)
+
+        def _refrescar_fila(self, fila):
+            """Sincroniza ruta y semaforo de una fila extra con el perfil activo.
+
+            Lee la raiz del espacio extra para el SO SELECCIONADO en el combo
+            de la fila; raiz ausente -> campo vacio y semaforo de 'Ruta base
+            vacia' (``estado_unidad("")``, desconectado).
+            """
+            activo = self.combo_perfiles.currentText()
+            if not activo:
+                return
+            so_fila = fila["combo_so"].currentText()
+            raices = path_manager.raices_para_so(activo, self.ruta_store, so_fila)
+            raiz = (raices or {}).get(fila["espacio"]) or ""
+            fila["campo"].setText(raiz)
+            self._actualizar_semaforo(fila["campo"], fila["semaforo"])
+
+        def _propagar_env_extra(self, resultado):
+            """Propaga el env del resultado SOLO via injector + refresca Reads.
+
+            Mismo contrato que ``_aplicar_resultado`` pero SIN cerrar el
+            dialogo: los flujos por fila (OK/add/[-]) persisten y re-aplican
+            el env dejando el dialogo abierto para seguir editando (D6).
+            """
+            env = resultado.get("env")
+            if env:
+                injector.cachear_env(env)
+                injector.aplicar_entorno(env)
+            self._refrescar_reads()
+
+        def _ok_extra(self, fila):
+            """OK de una fila extra: persiste el slot ``(extra, SO)`` y propaga env.
+
+            ``preparar_cambio_base`` acepta la clave extra del perfil (R4) y
+            reemplaza SOLO el slot ``(extra, so_fila)`` bajo lock: los otros
+            SO del extra, los espacios canonicos y los demas usuarios quedan
+            intactos. La ruta vacia o un ``ValueError`` del helper se informan
+            sin escribir.
+            """
+            activo = self.combo_perfiles.currentText()
+            if not activo:
+                return
+            so_fila = fila["combo_so"].currentText()
+            ruta = fila["campo"].text().strip()
+            if not ruta:
+                self._informar(
+                    "Path Manager: defina la ruta de '%s'." % fila["espacio"]
+                )
+                return
+            try:
+                resultado = path_manager.preparar_cambio_base(
+                    activo, self.ruta_store, so_fila, fila["espacio"], ruta
+                )
+            except ValueError as error:
+                self._informar("Path Manager: %s" % error)
+                return
+            self._propagar_env_extra(resultado)
+            self._refrescar_fila(fila)
+            self._informar(
+                "Path Manager: espacio extra '%s' actualizado en %s."
+                % (fila["espacio"], so_fila)
+            )
+
+        def _quitar_extra(self, fila):
+            """[-] de una fila extra: elimina el espacio y propaga env (D6).
+
+            ``eliminar_espacio_extra`` (D7) delega en el motor
+            (``eliminar_espacio_store``): los canonicos nunca se tocan (D1) y
+            una clave ausente es no-op; la fila desaparece del subarbol.
+            """
+            activo = self.combo_perfiles.currentText()
+            if not activo:
+                return
+            so_fila = fila["combo_so"].currentText()
+            try:
+                resultado = path_manager.eliminar_espacio_extra(
+                    activo, self.ruta_store, fila["espacio"], so_fila
+                )
+            except ValueError as error:
+                self._informar("Path Manager: %s" % error)
+                return
+            self._propagar_env_extra(resultado)
+            self._refrescar_extras()
+            self._informar(
+                "Path Manager: espacio extra '%s' eliminado." % fila["espacio"]
+            )
+
+        def _agregar_extra(self):
+            """'[+ Agregar espacio extra]': valida el nombre (D8) y persiste.
+
+            ``sanitizar_espacio_extra`` rechaza canonicos, legacy
+            ``hosts``/``default``, ``PROJECT_ROOT``, duplicados intra-extra y
+            nombres path-like/JSON-reservados: el error se informa via
+            ``nuke.message`` SIN ninguna escritura. Luego
+            ``agregar_espacio_extra`` mergea el slot nuevo bajo lock (el SO
+            del combo de la fila nueva, D2) y el env se propaga por injector;
+            el dialogo queda abierto y aparecen la fila nueva. El widget NUNCA
+            escribe raices ni el entorno por su cuenta.
+            """
+            activo = self.combo_perfiles.currentText()
+            if not activo:
+                return
+            nombre = self.campo_nombre_extra.text().strip()
+            ruta = self.campo_ruta_extra.text().strip()
+            if not nombre:
+                self._informar("Path Manager: defina el nombre del espacio extra.")
+                return
+            if not ruta:
+                self._informar("Path Manager: defina la ruta del espacio extra.")
+                return
+            perfiles = rutas_engine.leer_perfiles(self.ruta_store)
+            try:
+                clave = path_manager.sanitizar_espacio_extra(
+                    nombre, perfiles.get(activo)
+                )
+            except ValueError as error:
+                self._informar("Path Manager: %s" % error)
+                return
+            so_extra = self.combo_so_extra.currentText()
+            try:
+                resultado = path_manager.agregar_espacio_extra(
+                    activo, self.ruta_store, so_extra, nombre, ruta
+                )
+            except ValueError as error:
+                self._informar("Path Manager: %s" % error)
+                return
+            self._propagar_env_extra(resultado)
+            self.campo_nombre_extra.clear()
+            self.campo_ruta_extra.clear()
+            self._refrescar_extras()
+            self._informar(
+                "Path Manager: espacio extra '%s' agregado." % clave
+            )
 
         def _informar(self, texto):
             """Feedback al artista via ``nuke.message``; tolerante sin nuke."""
